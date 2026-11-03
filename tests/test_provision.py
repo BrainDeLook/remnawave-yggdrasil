@@ -18,6 +18,8 @@ class Panel:
     def nodes(self): return [Node.parse(NODE)]
     def hosts(self): return []
     def request(self,method,path,body=None):
+        if method=='GET' and path.startswith('/nodes/'):
+            return dict(NODE,isConnected=False)  # Expected transient while applying the profile.
         if method=='GET' and path.startswith('/config-profiles/'):
             return {'config':copy.deepcopy(self.config),'inbounds':[{'uuid':value,'tag':tag} for tag,value in self.ids.items()]}
         if method=='PATCH' and path=='/nodes': self.updates.append(body); return {}

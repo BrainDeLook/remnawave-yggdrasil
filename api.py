@@ -56,10 +56,10 @@ class Node:
     inbounds: tuple[Inbound, ...]
 
     @classmethod
-    def parse(cls, value: Any) -> Node:
+    def parse(cls, value: Any, require_connected: bool = True) -> Node:
         d = obj(value)
         profile = obj(d.get('configProfile'))
-        if not d.get('isConnected') or d.get('isDisabled'):
+        if (require_connected and not d.get('isConnected')) or d.get('isDisabled'):
             raise Error('Выбранная нода отключена или не подключена к панели')
         return cls(uid(d, 'uuid'), string(d, 'name'), string(d, 'address'),
                    uid(profile, 'activeConfigProfileUuid'),

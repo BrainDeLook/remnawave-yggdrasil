@@ -26,8 +26,10 @@ def apply(api: API, node: Node, before: dict, config: dict, mapping: dict[str,st
     # A lost PATCH response is resolved by a normal rerun; no blind mutation retries.
     updated=obj(api.request('GET','/config-profiles/'+node.profile))
     identifiers={string(obj(i),'tag'):uid(obj(i),'uuid') for i in seq(updated.get('inbounds'))}
-    latest=next((n for n in api.nodes() if n.uuid==node.uuid),None)
-    if latest is None or latest.profile!=node.profile: raise Error('Активный профиль ноды изменился. Новые Host не создавались.')
+    # Applying a profile can briefly reconnect the node. Read its stored binding directly,
+    # rather than filtering it out of the connected-node selection list during our reload.
+    latest=Node.parse(api.request('GET','/nodes/'+node.uuid),require_connected=False)
+    if latest.profile!=node.profile: raise Error('Активный профиль ноды изменился. Новые Host не создавались.')
     active=[i.uuid for i in latest.inbounds]
     for tag in mapping.values():
         if tag not in identifiers: raise Error('Панель не создала inbound: '+tag)
