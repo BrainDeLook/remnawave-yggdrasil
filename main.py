@@ -18,10 +18,10 @@ import sys
 import termios
 from urllib.parse import quote
 
-from api import API, Error, Host, Node, eligible, host_payload, obj, string, upsert
+from api import API, AccessRequired, Error, Host, Node, eligible, host_payload, obj, string, upsert
 import node as local
 from probe import export, verify
-VERSION='0.1.0'
+VERSION='0.1.1'
 
 COLOR=sys.stdout.isatty() and os.environ.get('TERM')!='dumb' and 'NO_COLOR' not in os.environ
 
@@ -90,6 +90,7 @@ def main():
     parser.add_argument('--version',action='version',version=VERSION)
     parser.add_argument('--panel',help='HTTPS URL панели')
     parser.add_argument('--token-file',type=Path,help='файл с API-токеном; токен в argv не принимается')
+    parser.add_argument('--access-file',type=Path,help='закрытый файл с секретной ссылкой eGames или Cookie')
     parser.add_argument('--node',help='UUID именно этого VPS в панели')
     parser.add_argument('--source-host',help='UUID действующего VLESS TCP Reality Host')
     parser.add_argument('--name',help='название нового Host')
@@ -121,8 +122,23 @@ def main():
         token=os.environ.pop('REMNAWAVE_API_TOKEN','')
         if not token and not args.yes: token=getpass.getpass('  API-токен (скрытый ввод, не сохраняется): ').strip()
     api=API(panel,token)
+    access_secret=os.environ.pop('REMNAWAVE_PANEL_ACCESS','')
+    if args.access_file:
+        if args.access_file.stat().st_mode & 0o077: raise Error('Файл доступа должен быть закрыт: chmod 600')
+        access_secret=args.access_file.read_text().strip()
+    if access_secret: api.set_access(access_secret)
     say('[1/5] Проверка панели и существующей ноды…')
-    selected=choose(api.nodes(),args.node,old.get('node_uuid'),args.yes,'Нода ЭТОГО VPS')
+    try:
+        nodes=api.nodes()
+    except AccessRequired as exc:
+        if args.yes or access_secret: raise
+        say('  '+str(exc),'33')
+        say('  Если панель установлена eGames, нужна ПОЛНАЯ секретная ссылка входа:\n  https://panel.example.com/auth/login?СЕКРЕТНОЕ_ИМЯ=СЕКРЕТНОЕ_ЗНАЧЕНИЕ\n  Возьмите её из результата установки/меню eGames. Это не URL из адресной строки после входа.\n  Можно ввести Cookie name=value. Не отправляйте ссылку или Cookie в чат.','33')
+        access_secret=getpass.getpass('  Секретная ссылка или Cookie (скрыто; Enter — завершить): ').strip()
+        if not access_secret: raise Error('API скрыт внешней защитой. Для eGames повторите запуск с секретной ссылкой; для TinyAuth/Cloudflare Access настройте штатный API-доступ.') from None
+        api.set_access(access_secret)
+        nodes=api.nodes()  # Retry only this read, never a mutation.
+    selected=choose(nodes,args.node,old.get('node_uuid'),args.yes,'Нода ЭТОГО VPS')
     hosts=api.hosts()
     source=choose([h for h in hosts if eligible(selected,h)],args.source_host,old.get('source_host_uuid'),args.yes,'Исходный VLESS Reality Host')
     raw=api.inbound(selected,source)

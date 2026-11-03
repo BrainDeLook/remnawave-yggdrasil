@@ -3,6 +3,9 @@ from __future__ import annotations
 import copy
 import ipaddress
 import json
+import re
+import socket
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -11,6 +14,9 @@ from typing import Any
 from uuid import UUID
 
 class Error(RuntimeError):
+    pass
+
+class AccessRequired(Error):
     pass
 
 def obj(value: Any) -> dict:
@@ -98,24 +104,55 @@ class API:
         self.url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, '/api', '', ''))
         self.local = parsed.hostname in ("localhost", "127.0.0.1", "::1")
         self.token = token
+        self.cookie = ''
         self.opener = urllib.request.build_opener(NoRedirect)
+
+    def set_access(self, value: str):
+        """Accept an owner's eGames login URL or Cookie, without requesting that URL."""
+        value = value.strip()
+        if value.startswith(('https://', 'http://')):
+            parsed = urllib.parse.urlsplit(value)
+            origin = urllib.parse.urlsplit(self.url)
+            if (parsed.scheme, parsed.netloc) != (origin.scheme, origin.netloc) or parsed.path != '/auth/login' or parsed.fragment:
+                raise Error('Секретная ссылка должна вести на /auth/login той же панели')
+            pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+            if len(pairs) != 1:
+                raise Error('В ссылке eGames ожидается один секретный параметр name=value')
+            value = '='.join(pairs[0])
+        if not value or len(value) > 8192 or not all(re.fullmatch(r'[A-Za-z0-9_-]+=[A-Za-z0-9._~+/=-]+', pair.strip()) for pair in value.split(';')):
+            raise Error('Введите секретную ссылку eGames или Cookie в формате name=value; значение не выводится')
+        self.cookie = value
 
     def request(self, method: str, path: str, body: dict | None = None) -> Any:
         payload = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.url + path, payload, method=method,
               headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': 'application/json',
+                       **({'Cookie': self.cookie} if self.cookie else {}),
                        **({'X-Forwarded-For': '127.0.0.1'} if self.local else {}),
-                       'X-Forwarded-Proto': 'https', 'User-Agent': 'remnawave-yggdrasil/0.1.0'})
+                       'X-Forwarded-Proto': 'https', 'User-Agent': 'remnawave-yggdrasil/0.1.1'})
         try:
             with self.opener.open(req, timeout=30) as response:
-                data = json.loads(response.read(8 * 1024 * 1024))
+                content_type = response.headers.get_content_type()
+                raw = response.read(8 * 1024 * 1024)
+                if content_type == 'text/html' or raw.lstrip().startswith((b'<', b'<!')):
+                    raise AccessRequired('API вернул HTML вместо JSON (HTTP '+str(response.status)+'). Возможна cookie-защита eGames или страница внешнего входа; права API-токена ещё не подтверждены.')
+                data = json.loads(raw)
         except urllib.error.HTTPError as exc:
             # Response bodies may contain secrets. Do not echo them or the token.
             code=exc.code
             exc.close()
             raise Error(f'API {method} {path.split("?")[0]}: HTTP {code}. Проверьте права токена и доступ к API через reverse proxy.') from None
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise Error('API недоступен, вернул не JSON или истёк тайм-аут. TLS-проверка не отключается.') from None
+        except urllib.error.URLError as exc:
+            reason = exc.reason
+            if isinstance(reason, ssl.SSLCertVerificationError): message = 'Ошибка проверки TLS-сертификата панели. Проверьте сертификат и время VPS.'
+            elif isinstance(reason, socket.gaierror): message = 'DNS не смог определить адрес панели.'
+            elif isinstance(reason, TimeoutError): message = 'Истёк тайм-аут подключения к API панели.'
+            else: message = 'Не удалось подключиться к API панели. Проверьте сеть и reverse proxy.'
+            raise Error(message) from None
+        except TimeoutError:
+            raise Error('Истёк тайм-аут ответа API панели.') from None
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise Error('API вернул некорректный JSON. Тело ответа скрыто, поскольку может содержать секреты.') from None
         data=obj(data)
         if 'response' not in data: raise Error('Неожиданный формат API: отсутствует response')
         return data['response']

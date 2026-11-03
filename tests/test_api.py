@@ -9,7 +9,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from uuid import uuid4
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from api import API, Error, Host, Node, eligible, host_payload, upsert
+from api import API, AccessRequired, Error, Host, Node, eligible, host_payload, upsert
 from node import networks
 
 N,P,I,H=map(str,[uuid4(),uuid4(),uuid4(),uuid4()])
@@ -29,6 +29,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status); self.send_header('Content-Type','application/json'); self.end_headers(); self.wfile.write(json.dumps({'response':data}).encode())
     def do_GET(self):
         self.server.reads.append(self.path)
+        if self.server.gate and self.headers.get('Cookie') != 'secret_name=secret_value':
+            self.send_response(200); self.send_header('Content-Type','text/html'); self.end_headers()
+            self.wfile.write(b'<html>DECOY_SECRET_BODY</html>'); return
         if self.path=='/api/redirect':
             self.send_response(302); self.send_header('Location','http://127.0.0.1:9/credential-sink'); self.end_headers(); return
         if self.headers.get('Authorization')!='Bearer TEST_TOKEN': self.response({},401); return
@@ -49,6 +52,7 @@ class Integration(unittest.TestCase):
     def setUp(self):
         self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
         self.server.hosts=[copy.deepcopy(SOURCE)]; self.server.writes=[]; self.server.reads=[]
+        self.server.gate=False
         self.thread=threading.Thread(target=self.server.serve_forever,daemon=True); self.thread.start()
         self.api=API('http://127.0.0.1:'+str(self.server.server_port),'TEST_TOKEN')
     def tearDown(self): self.server.shutdown(); self.server.server_close(); self.thread.join()
@@ -76,8 +80,28 @@ class Integration(unittest.TestCase):
         with self.assertRaises(Error): upsert(self.api,host_payload(n,s,RAW,'200:db8::1','Ygg'),[s],H)
         self.assertFalse(self.server.writes)
     def test_token_not_forwarded_on_redirect(self):
+        self.api.set_access('secret_name=secret_value')
         with self.assertRaisesRegex(Error,'HTTP 302'): self.api.request('GET','/redirect')
         self.assertEqual(self.server.reads,['/api/redirect'])
+    def test_egames_html_gate_then_secret_login_url(self):
+        self.server.gate=True
+        with self.assertRaises(AccessRequired) as error: self.api.nodes()
+        self.assertIn('HTTP 200',str(error.exception))
+        self.assertNotIn('DECOY_SECRET_BODY',str(error.exception))
+        self.api.set_access(self.api.url.removesuffix('/api')+'/auth/login?secret_name=secret_value')
+        self.assertEqual(self.api.nodes()[0].uuid,N)
+        self.assertEqual(self.server.reads,['/api/nodes','/api/nodes'])
+        self.assertFalse(self.server.writes)
+    def test_gate_cookie_does_not_bypass_token_authentication(self):
+        self.server.gate=True
+        self.api.set_access('secret_name=secret_value'); self.api.token='WRONG'
+        with self.assertRaisesRegex(Error,'HTTP 401'): self.api.nodes()
+    def test_access_secret_is_bound_to_panel_and_rejects_header_injection(self):
+        for value in ('https://evil.example/auth/login?name=secret',
+                      self.api.url+'?name=secret', 'name=secret\r\nX-Evil: injected',
+                      self.api.url.removesuffix('/api')+'/auth/login?one=1&two=2'):
+            with self.assertRaises(Error) as error: self.api.set_access(value)
+            self.assertNotIn('secret',str(error.exception))
     def test_sni_is_never_replaced_by_ygg_ipv6(self):
         source=copy.deepcopy(SOURCE); source.update(overrideSniFromAddress=True,address='reality.example.com')
         payload=host_payload(Node.parse(NODE),Host.parse(source),RAW,'200:db8::1','Ygg')
