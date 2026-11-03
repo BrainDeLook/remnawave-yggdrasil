@@ -174,7 +174,10 @@ def main():
         if not cert: raise Error('Укажите --cert и --key для Hysteria2')
         key=key or cert.parent/'privkey.pem'
         if not cert.is_file() or not key.is_file(): raise Error('Не найдены сертификат или ключ Hysteria2')
-        local.run('openssl','x509','-in',str(cert),'-noout','-checkhost',source.address)
+        check=local.run('openssl','x509','-in',str(cert),'-noout','-checkhost',source.address)
+        # Older OpenSSL can return exit status 0 even for a hostname mismatch.
+        if 'does match certificate' not in check:
+            raise Error('Сертификат Hysteria2 не подходит для домена Host '+source.address)
     say('\n  План применения','1;35')
     say('  Нода: '+selected.name+' · '+selected.address+'\n  Профиль: '+profile['name']+' (если общий — новые inbound не активируются на других нодах)')
     for p,tag in mapping.items():
