@@ -46,7 +46,7 @@ def export(raw: dict, payload: dict, user: dict) -> tuple[str,dict]:
     return link,out
 
 
-def verify(out: dict):
+def verify(out: dict, outbound_override: dict | None = None):
     binary = os.environ.get('REMNA_YGG_XRAY')
     if not binary:
         arch=run('dpkg','--print-architecture').strip()
@@ -68,6 +68,7 @@ def verify(out: dict):
             'streamSettings':{'network':'tcp','security':'reality','realitySettings':{
                          'serverName':tls['server_name'],'fingerprint':tls['utls']['fingerprint'],
                          'publicKey':tls['reality']['public_key'],'shortId':tls['reality']['short_id']}}}]}
+    if outbound_override is not None: config['outbounds']=[outbound_override]
     with tempfile.TemporaryDirectory(prefix='remna-ygg-check-') as directory:
         path=Path(directory)/'client.json'; path.write_text(json.dumps(config)); path.chmod(0o600)
         with open(Path(directory)/'client.log','w') as log:

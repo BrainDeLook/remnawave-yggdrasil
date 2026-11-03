@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+import urllib.parse
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from api import API, Error
 from node import run
@@ -185,7 +186,7 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         # New panel-managed mode: real profile append, independent squads, all transports.
         cert=ROOT/'.test-bin/hy2-cert.pem'; certkey=ROOT/'.test-bin/hy2-key.pem'
         run('openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=127.0.0.1',
-            '-addext','subjectAltName=DNS:127.0.0.1','-keyout',str(certkey),'-out',str(cert))
+            '-addext','subjectAltName=DNS:127.0.0.1,IP:127.0.0.1','-keyout',str(certkey),'-out',str(cert))
         multi_args=[sys.executable,str(ROOT/'multi.py'),'--yes','--no-ssh','--panel','http://127.0.0.1:3000',
                     '--node',node['uuid'],'--source-host',source['uuid'],'--name','Multi CI',
                     '--protocol','hy2','--protocol','grpc','--protocol','xhttp','--protocol','ygg',
@@ -203,11 +204,45 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         time.sleep(10)
         verify(export(ygg_raw,dict(source,address=address,port=1488),user)[1])
         verify(public_client)
+        links=api.request('GET','/subscriptions/by-username/'+user['username'])['links']
+        parsed=[urllib.parse.urlsplit(link) for link in links]
+        names=[urllib.parse.unquote(link.fragment) for link in parsed]
+        assert all(h['name'] in names for h in state['hosts'])
+        # Test the same user-specific transport parameters the normal subscription exposes.
+        for host in state['hosts']:
+            protocol=host['protocol']
+            if protocol=='ygg': continue
+            link=next(link for link in parsed if urllib.parse.unquote(link.fragment)==host['name'])
+            params=urllib.parse.parse_qs(link.query)
+            if protocol=='hy2':
+                outbound={'protocol':'hysteria','settings':{'version':2,'address':'127.0.0.1','port':host['port']},
+                          'streamSettings':{'network':'hysteria','security':'tls',
+                             'hysteriaSettings':{'version':2,'auth':urllib.parse.unquote(link.username)},
+                             'tlsSettings':{'serverName':'127.0.0.1','alpn':['h3'],
+                                'certificates':[{'certificateFile':str(cert),'usage':'verify'}]}}}
+            else:
+                stream={'network':protocol,'security':'reality','realitySettings':{
+                    'serverName':params['sni'][0],'fingerprint':'chrome','publicKey':params['pbk'][0],
+                    'shortId':params['sid'][0]}}
+                if protocol=='grpc': stream['grpcSettings']={'serviceName':params['serviceName'][0]}
+                if protocol=='xhttp': stream['xhttpSettings']={'path':params['path'][0],'mode':'auto'}
+                outbound={'protocol':'vless','settings':{'vnext':[{'address':'127.0.0.1','port':host['port'],
+                              'users':[{'id':urllib.parse.unquote(link.username),'encryption':'none'}]}]},'streamSettings':stream}
+            verify(public_client,outbound_override=outbound)
+            print('PASS HTTPS through subscribed '+protocol+' transport',flush=True)
         # A distinct squad with only the old inbound must not acquire any new inbound.
         other=api.request('POST','/internal-squads',{'name':'Old inbound only','inbounds':[inbound]})
         assert len(api.request('GET','/internal-squads/'+other['uuid'])['inbounds'])==1
         own=api.request('GET','/internal-squads/'+squad['uuid'])
         assert len(own['inbounds'])==5
+        # An owner with only the original inbound receives none of the new Hosts.
+        restricted=api.request('POST','/users',{'username':'old-inbound-only',
+                   'expireAt':(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=1)).isoformat(),
+                   'activeInternalSquads':[other['uuid']]})
+        restricted_links=api.request('GET','/subscriptions/by-username/'+restricted['username'])['links']
+        restricted_names=[urllib.parse.unquote(urllib.parse.urlsplit(link).fragment) for link in restricted_links]
+        assert not any(h['name'] in restricted_names for h in state['hosts'])
+        print('PASS actual subscriptions: new servers appear only for permitted squads',flush=True)
         run('ip','-6','addr','add','200:db8::ffff/128','dev','lo','nodad')
         run('ip','-n','remna-ygg-ci','-6','route','add','200:db8::ffff/128','via','fd42:4567::1','dev','ry-client')
         isolation="""import socket,sys
