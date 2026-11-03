@@ -173,6 +173,8 @@ After=remna-ygg-network.service
     run('systemctl','daemon-reload')
     run('systemctl','enable','remna-ygg-network','yggdrasil')
     run('systemctl','restart','remna-ygg-network')
+    # Package post-install may have hit StartLimit before scoped IPv6 was prepared.
+    run('systemctl','reset-failed','yggdrasil')
     run('systemctl','restart','yggdrasil')
     address = run('yggdrasil','-useconffile',str(path),'-address').strip()
     if ipaddress.IPv6Address(address) not in ipaddress.IPv6Network('200::/8'):
