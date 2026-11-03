@@ -292,6 +292,8 @@ def firewall(address: str, port: int, allowed: list[str], ssh_port: int, ssh_all
     legacy_ports = sorted(set(extra_vpn_ports)-{port})
     ssh_ports={22,ssh_port}
     if shutil.which('sshd'):
+        # Some images ship sshd but create its runtime directory only when it starts.
+        Path('/run/sshd').mkdir(exist_ok=True)
         ssh_ports.update(int(line.split()[1]) for line in run('sshd','-T').splitlines() if line.startswith('port '))
         for line in run('ss','-H','-lntp').splitlines():
             if re.search(r'"sshd(?:-[^"]*)?"',line):
