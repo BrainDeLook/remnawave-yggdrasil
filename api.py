@@ -109,7 +109,9 @@ class API:
                 data = json.loads(response.read(8 * 1024 * 1024))
         except urllib.error.HTTPError as exc:
             # Response bodies may contain secrets. Do not echo them or the token.
-            raise Error(f'API {method} {path.split("?")[0]}: HTTP {exc.code}. Проверьте права токена и доступ к API через reverse proxy.') from None
+            code=exc.code
+            exc.close()
+            raise Error(f'API {method} {path.split("?")[0]}: HTTP {code}. Проверьте права токена и доступ к API через reverse proxy.') from None
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             raise Error('API недоступен, вернул не JSON или истёк тайм-аут. TLS-проверка не отключается.') from None
         data=obj(data)
