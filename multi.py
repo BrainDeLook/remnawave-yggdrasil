@@ -32,7 +32,7 @@ def result():
         say(f"  {LABELS[host['protocol']]}\n    inbound: {host['tag']}\n    Host: {host['name']} · {host['address']}:{host['port']}")
     if state.get('address'): say('  IPv6 Yggdrasil ноды: '+state['address'])
     if state.get('ssh'): say('  SSH: ssh -6 -p '+str(state['ssh_port'])+' root@'+state['address'])
-    say('  Откройте Remnawave → Внутренние сквады: новые inbound можно включать отдельно.\n  Host → ограничения внутренних сквадов управляют показом каждого Host в подписке.\n  На новых Host действует «Разрешить только выбранным сквадам».\n  Если сквады не выбраны, выдача в подписки закрыта до настройки в панели.\n  Обновите обычную личную подписку в клиенте. Общий UUID не создаётся.','32')
+    say('  Откройте Remnawave → Внутренние сквады: новые inbound можно включать отдельно.\n  Host → ограничения внутренних сквадов управляют показом каждого Host в подписке.\n  Если сквады выбраны, на новом Host разрешён показ только им.\n  Если сквады не выбраны, новый Host ВЫКЛЮЧЕН. В панели выберите ему\n  разрешённые сквады, разрешите inbound и включите Host.\n  Обновите обычную личную подписку в клиенте. Общий UUID не создаётся.','32')
     say('  Тахион: подписка не передаёт bind_interface. На некоторых версиях требуется\n  привязка к интерфейсу Yggdrasil на роутере. Это ограничение клиента, не панели.','33')
     say('  Проверены API-настройки и локальные слушатели. Проверка реального VPN\n  выполняется вашим клиентом после обновления подписки.')
 
@@ -117,7 +117,7 @@ def main():
     known={s['uuid'] for s in all_squads}
     if any(v not in known for v in args.squad): raise Error('Не найден указанный UUID сквада')
     grants={p:list(args.squad) for p in protocols}
-    say('\n  Шаг 4 · Кому доступны новые подключения\n  Внутренний сквад — группа VPN-пользователей в Remnawave.\n  Мастер добавит inbound в выбранные сквады, сохранив прежние разрешения.\n  На НОВЫХ Host дополнительно разрешит показ только этим сквадам.\n  Ничего не выбрали — новый Host пока не появится ни у кого.\n  Потом доступ меняется в панели: Сквады → inbound и Host → ограничения.\n  На уже созданных Host ручные ограничения панели сохраняются.')
+    say('\n  Шаг 4 · Кому доступны новые подключения\n  Внутренний сквад — группа VPN-пользователей в Remnawave.\n  Мастер добавит inbound в выбранные сквады, сохранив прежние разрешения.\n  На НОВЫХ Host дополнительно разрешит показ только этим сквадам.\n  Ничего не выбрали — новый Host создаётся ВЫКЛЮЧЕННЫМ. Потом в панели\n  назначьте сквады для inbound/Host и включите Host.\n  На уже созданных Host ручные ограничения панели сохраняются.')
     for p in protocols:
         if args.yes or args.squad: continue
         say('  '+LABELS[p])
@@ -145,6 +145,8 @@ def main():
             say('  Это ОТДЕЛЬНЫЙ список для управления сервером по SSH.\n  Доступ к VLESS не открывает SSH. Если SSH нужен с тех же устройств,\n  можно принять показанный список Enter. Ключ/пароль SSH по-прежнему нужен.')
             ssh_allowed=access(args.ssh_allow_ip,old.get('ssh_allowed') or allowed,args.yes,'Разрешить SSH этим IP/подсетям')
     ports=[raw_by_tag[tag]['port'] for tag in mapping.values()]
+    if ssh_enabled and args.ssh_port in [raw_by_tag[tag]['port'] for p,tag in mapping.items() if p!='hy2']:
+        raise Error('SSH-порт совпадает с TCP-портом выбранного дополнения')
     if 'ygg' in protocols and (raw_by_tag[mapping['ygg']]['port'] in (22,2222,args.ssh_port) or args.ssh_port==2222):
         raise Error('Yggdrasil VLESS, SSH и API Remnanode (2222) должны иметь разные порты')
     if not 1<=args.ssh_port<=65535: raise Error('Некорректный SSH-порт')

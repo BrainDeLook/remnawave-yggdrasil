@@ -60,9 +60,9 @@ def apply(api: API, node: Node, before: dict, config: dict, mapping: dict[str,st
         payload={'inbound':{'configProfileUuid':node.profile,'configProfileInboundUuid':identifier},
                  'remark':name+' · '+LABELS[protocol], 'address':address if protocol=='ygg' else source.address,
                  'port':raw['port'],'sni':sni,'fingerprint':'chrome' if protocol!='hy2' else None,
-                 'nodes':[node.uuid],'tags':[marker],'isDisabled':False,'isHidden':False,
+                 'nodes':[node.uuid],'tags':[marker],'isDisabled':not selected,'isHidden':False,
                  'overrideSniFromAddress':False,'keepSniBlank':False,
-                 'internalSquads':{'mode':'ALLOW_ONLY','squads':selected}}
+                 'internalSquads':{'mode':'ALLOW_ONLY' if selected else 'EXCLUDE','squads':selected}}
         if protocol=='grpc': payload['path']=stream['grpcSettings']['serviceName']
         if protocol=='xhttp': payload['path']=stream['xhttpSettings']['path']
         if protocol=='hy2': payload['alpn']='h3'

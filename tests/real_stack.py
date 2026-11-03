@@ -222,10 +222,10 @@ print('PASS dedicated Ygg port: owner can connect only to Ygg address, other int
         print(run(*ns,sys.executable,'-c',isolation,address))
         # A manual Host edit is authoritative, including independent access restrictions.
         api.request('PATCH','/hosts',{'uuid':ygg_host['host_uuid'],'remark':'Edited in panel',
-                    'internalSquads':{'mode':'ALLOW_ONLY','squads':[]}})
+                    'internalSquads':{'mode':'ALLOW_ONLY','squads':[other['uuid']]}})
         subprocess.run(multi_args,check=True)
         edited=api.request('GET','/hosts/'+ygg_host['host_uuid'])
-        assert edited['remark']=='Edited in panel' and edited['internalSquads']['squads']==[]
+        assert edited['remark']=='Edited in panel' and edited['internalSquads']['squads']==[other['uuid']]
         assert len([h for h in api.hosts() if any(t.startswith('REMNA_MULTI_') for t in h.raw['tags'])])==4
         assert Path('/dev/shm/hysteria_key.pem').stat().st_mode & 0o077 == 0
         print('PASS all protocol listeners, panel profile/squad/Host control, preserved public VLESS, idempotence and protected certificate key')
