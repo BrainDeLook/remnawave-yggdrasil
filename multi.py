@@ -149,7 +149,9 @@ def main():
     config,mapping=convert(typed,base,protocols,{'ygg':args.ygg_port})
     raw_by_tag={i['tag']:i for i in config['inbounds']}
     name=args.name or old.get('name') or selected.name
-    if not args.yes and not args.name: name=prompt('Название сервера (к нему добавятся названия протоколов)',name)
+    if not args.yes and not args.name:
+        say('  Общее название без протокола. Например: 🇳🇱 Нидерланды.\n  Мастер добавит короткое окончание Histeria, GRPC, XHTTP или Ygg.','example')
+        name=prompt('Общее название сервера',name)
     if not 1<=len(name)<=60 or any(c in name for c in '\r\n'): raise Error('Название должно содержать от 1 до 60 символов')
     all_squads=provision.squads(api)
     known={s['uuid'] for s in all_squads}

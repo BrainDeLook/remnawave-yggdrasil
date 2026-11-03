@@ -113,7 +113,8 @@ def setup_ygg(peers: list[str], backup: Path) -> str:
     path = Path(match.group(1) or match.group(2))
     if not path.is_absolute() or '$' in str(path):
         raise Error('Неподдерживаемый путь конфига Yggdrasil')
-    original = path.read_text() if path.exists() else ''
+    previous_stat = path.stat() if path.exists() else None
+    original = path.read_text() if previous_stat else ''
     if original:
         shutil.copy2(path, backup/'yggdrasil.conf')
         config = json.loads(run('yggdrasil','-useconffile',str(path),'-normaliseconf','-json'))
@@ -159,11 +160,13 @@ ExecStart=/usr/bin/python3 {APP}/main.py --network-only
 [Install]
 WantedBy=multi-user.target
 ''',0o644)
-    mode = path.stat().st_mode & 0o777 if path.exists() else 0o640
+    mode = previous_stat.st_mode & 0o777 if previous_stat else 0o640
     write(path,json.dumps(config,indent=2)+'\n',mode)
-    # Preserve package group ownership even though atomic replacement creates a new inode.
+    # Atomic replacement must preserve the existing daemon's ability to read its identity.
     import grp
-    if any(g.gr_name == 'yggdrasil' for g in grp.getgrall()):
+    if previous_stat:
+        os.chown(path,previous_stat.st_uid,previous_stat.st_gid)
+    elif any(g.gr_name == 'yggdrasil' for g in grp.getgrall()):
         shutil.chown(path,group='yggdrasil')
     address = run('yggdrasil','-useconffile',str(path),'-address').strip()
     write(BASE/'network.json',json.dumps({'interface':iface,'user':user,'address':address}))
@@ -351,6 +354,10 @@ ExecReload={APP}/apply-access.sh
 ExecStop=-/usr/sbin/nft delete table inet {TABLE}
 [Install]
 WantedBy=multi-user.target
+''',0o644)
+    write(Path('/etc/systemd/system/yggdrasil.service.d/remna-ygg-access.conf'),'''[Unit]
+Requires=remna-ygg-access.service
+After=remna-ygg-access.service
 ''',0o644)
     run('systemctl','daemon-reload')
     run('systemctl','enable','remna-ygg-access')

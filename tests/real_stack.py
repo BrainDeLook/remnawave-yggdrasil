@@ -78,18 +78,18 @@ def main():
     print('CI: real Remnanode connected',flush=True)
     # Real neighbours distinguish profile-wide reloads from changes to node bindings.
     # Docker bridge isolates their Xray listeners while the panel reaches both APIs.
-    for container,api_port,proxy_port in [('remnanode-shared-ci',2224,2443),('remnanode-other-ci',2225,2444)]:
-        run('docker','run','-d','--name',container,'-p',f'127.0.0.1:{api_port}:2222',
+    for container,api_ip,api_port,proxy_port in [('remnanode-shared-ci','127.0.0.2',2224,2443),('remnanode-other-ci','127.0.0.3',2225,2444)]:
+        run('docker','run','-d','--name',container,'-p',f'{api_ip}:{api_port}:2222',
             '-p',f'127.0.0.1:{proxy_port}:443','-e','NODE_PORT=2222','-e','SECRET_KEY',
             'remnawave/node:latest',timeout=300)
-    shared_node=api.request('POST','/nodes',{'name':'Same profile neighbour','address':'127.0.0.1','port':2224,
+    shared_node=api.request('POST','/nodes',{'name':'Same profile neighbour','address':'127.0.0.2','port':2224,
          'configProfile':{'activeConfigProfileUuid':profile['uuid'],'activeInbounds':[inbound]}})
     other_raw=dict(raw,tag='VLESS_UNRELATED_CI')
     other_profile=api.request('POST','/config-profiles',{'name':'Unrelated profile','config':{
         'log':{'loglevel':'error'},'inbounds':[other_raw],
         'outbounds':[{'protocol':'freedom','tag':'UNRELATED_DIRECT'}]}})
     other_inbound=other_profile['inbounds'][0]['uuid']
-    unrelated_node=api.request('POST','/nodes',{'name':'Different profile neighbour','address':'127.0.0.1','port':2225,
+    unrelated_node=api.request('POST','/nodes',{'name':'Different profile neighbour','address':'127.0.0.3','port':2225,
          'configProfile':{'activeConfigProfileUuid':other_profile['uuid'],'activeInbounds':[other_inbound]}})
     wait(lambda: {shared_node['uuid'],unrelated_node['uuid']} <= {n.uuid for n in api.nodes()})
     squad=api.request('POST','/internal-squads',{'name':'Native Ygg CI','inbounds':[inbound]})
