@@ -281,7 +281,8 @@ WantedBy=multi-user.target
     raise Error('Отдельный SSH не запустился: journalctl -u remna-ygg-ssh')
 
 
-def firewall(address: str, port: int, allowed: list[str], ssh_port: int, ssh_allowed: list[str], ready: bool = False):
+def firewall(address: str, port: int, allowed: list[str], ssh_port: int, ssh_allowed: list[str], ready: bool = False,
+             exclusive: bool = False, extra_vpn_ports: tuple[int,...] = ()):
     ufw = bool(shutil.which('ufw') and 'Status: active' in run('ufw','status'))
     if ufw and not re.search(r'(?m)^IPV6=yes\s*$',Path('/etc/default/ufw').read_text()):
         raise Error('У активного UFW отключён IPv6. Включите поддержку IPv6 до установки.')
@@ -293,7 +294,7 @@ def firewall(address: str, port: int, allowed: list[str], ssh_port: int, ssh_all
             if chain.get('policy') == 'drop' or nonempty:
                 raise Error('Нестандартный INPUT firewall: настройте точечный доступ и повторите с --firewall-ready. Правила Docker не менялись.')
     if ufw:
-        for service_port,clients in ((port,allowed),(ssh_port,ssh_allowed)):
+        for service_port,clients in [(p,allowed) for p in (port,*extra_vpn_ports)]+[(ssh_port,ssh_allowed)]:
             for client in clients:
                 run('ufw','allow','in','from',client,'to',address,'port',str(service_port),'proto','tcp','comment','remna-ygg')
     sets = lambda values: ', '.join(values)
@@ -305,7 +306,8 @@ def firewall(address: str, port: int, allowed: list[str], ssh_port: int, ssh_all
  chain input {{
   type filter hook input priority -10; policy accept;
   iifname "lo" accept
-  ip6 daddr {address} tcp dport {port} jump vpn
+  ip6 daddr {address} tcp dport {{ {', '.join(map(str,sorted({port,*extra_vpn_ports})))} }} jump vpn
+  {f'tcp dport {port} counter drop' if exclusive else ''}
   ip6 daddr {address} tcp dport {{ {', '.join(map(str,sorted({22,ssh_port})))} }} jump ssh
  }}
 }}

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 umask 077
-VERSION=v0.1.1
-BUNDLE_SHA256=ac91faced897ab7b75bfa57a6df3cce643fa8f2175f1e382509556b907c47184
+VERSION=v0.2.0
+BUNDLE_SHA256=6e7b69da66361b127768f3ce828c7650ee8b11209b7507c0abe81affbdbc6cc0
 URL="https://github.com/BrainDeLook/remnawave-yggdrasil/releases/download/$VERSION/remnawave-yggdrasil-$VERSION.tar"
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     printf '%s\n' 'Remnawave + Yggdrasil: запуск на VPS действующей ноды.' \
       'sudo bash install.sh  — цветной мастер' \
       'sudo bash install.sh --check  — только проверка API и план' \
+      'Протоколы: Hysteria2, VLESS gRPC, VLESS XHTTP, VLESS через Yggdrasil.' \
       'API-токен вводится скрыто и не сохраняется.'
     exit 0
 fi
@@ -25,5 +26,5 @@ trap 'rm -rf -- "$scratch"' EXIT
 printf '\nЗагружаю Remnawave + Yggdrasil %s…\n' "$VERSION"
 curl -fsSL --retry 3 --connect-timeout 20 --max-time 180 --proto '=https' --proto-redir '=https' "$URL" -o "$scratch/bundle.tar"
 printf '%s  %s\n' "$BUNDLE_SHA256" "$scratch/bundle.tar" | sha256sum -c --status || { echo 'Контрольная сумма не совпала'; exit 1; }
-tar -xf "$scratch/bundle.tar" -C "$scratch" main.py api.py node.py probe.py
-python3 "$scratch/main.py" "$@"
+tar -xf "$scratch/bundle.tar" -C "$scratch" main.py api.py node.py probe.py multi.py converter.py provision.py certificates.py
+python3 "$scratch/multi.py" "$@"

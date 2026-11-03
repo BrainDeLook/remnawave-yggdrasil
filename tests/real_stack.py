@@ -61,7 +61,7 @@ def main():
     os.environ['REMNAWAVE_API_TOKEN']=api.token
     keys=api.request('GET','/keygen')
     os.environ['SECRET_KEY']=keys.get('secretKey') or keys['pubKey']
-    run('docker','run','-d','--name','remnanode','--network','host','-e','NODE_PORT=2222',
+    run('docker','run','-d','--name','remnanode','--network','host','-v','/dev/shm:/dev/shm','-e','NODE_PORT=2222',
         '-e','SECRET_KEY','remnawave/node:latest',timeout=300)
     key=base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip('=')
     raw={'tag':'VLESS_CI','listen':'::','port':443,'protocol':'vless','settings':{'clients':[],'decryption':'none'},
@@ -182,6 +182,53 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         assert snapshot['profile']==api.request('GET','/config-profiles/'+profile['uuid'])['config']
         verify(public_client)
         print('PASS SSH key login and disable; original public VLESS and containers preserved')
+        # New panel-managed mode: real profile append, independent squads, all transports.
+        cert=ROOT/'.test-bin/hy2-cert.pem'; certkey=ROOT/'.test-bin/hy2-key.pem'
+        run('openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=127.0.0.1',
+            '-addext','subjectAltName=DNS:127.0.0.1','-keyout',str(certkey),'-out',str(cert))
+        multi_args=[sys.executable,str(ROOT/'multi.py'),'--yes','--no-ssh','--panel','http://127.0.0.1:3000',
+                    '--node',node['uuid'],'--source-host',source['uuid'],'--name','Multi CI',
+                    '--protocol','hy2','--protocol','grpc','--protocol','xhttp','--protocol','ygg',
+                    '--squad',squad['uuid'],'--allow-ip','200:db8::111','--allow-ip','200:db8::333',
+                    '--allow-ip','300:db8:1:1::/64','--cert',str(cert),'--key',str(certkey),
+                    '--peer',f'tcp://127.0.0.1:{peer_port}']
+        subprocess.run(multi_args,check=True)
+        state=json.loads(Path('/etc/remnawave-yggdrasil/multi-state.json').read_text())
+        actual=api.request('GET','/config-profiles/'+profile['uuid'])
+        assert len(actual['config']['inbounds'])==5
+        assert actual['config']['inbounds'][0]==raw
+        assert api.request('GET','/hosts/'+source['uuid'])==snapshot['source']
+        ygg_host=next(h for h in state['hosts'] if h['protocol']=='ygg')
+        ygg_raw=next(i for i in actual['config']['inbounds'] if i['tag']==ygg_host['tag'])
+        time.sleep(10)
+        verify(export(ygg_raw,dict(source,address=address,port=1488),user)[1])
+        verify(public_client)
+        # A distinct squad with only the old inbound must not acquire any new inbound.
+        other=api.request('POST','/internal-squads',{'name':'Old inbound only','inbounds':[inbound]})
+        assert len(api.request('GET','/internal-squads/'+other['uuid'])['inbounds'])==1
+        own=api.request('GET','/internal-squads/'+squad['uuid'])
+        assert len(own['inbounds'])==5
+        run('ip','-6','addr','add','200:db8::ffff/128','dev','lo','nodad')
+        run('ip','-n','remna-ygg-ci','-6','route','add','200:db8::ffff/128','via','fd42:4567::1','dev','ry-client')
+        isolation="""import socket,sys
+for target,expected in [(sys.argv[1],True),('200:db8::ffff',False)]:
+ with socket.socket(socket.AF_INET6,socket.SOCK_STREAM) as s:
+  s.settimeout(3);s.bind(('200:db8::111',0))
+  try:s.connect((target,1488));connected=True
+  except (TimeoutError,ConnectionRefusedError):connected=False
+  assert connected==expected,(target,connected)
+print('PASS dedicated Ygg port: owner can connect only to Ygg address, other interface blocked')
+"""
+        print(run(*ns,sys.executable,'-c',isolation,address))
+        # A manual Host edit is authoritative, including independent access restrictions.
+        api.request('PATCH','/hosts',{'uuid':ygg_host['host_uuid'],'remark':'Edited in panel',
+                    'internalSquads':{'mode':'ALLOW_ONLY','squads':[]}})
+        subprocess.run(multi_args,check=True)
+        edited=api.request('GET','/hosts/'+ygg_host['host_uuid'])
+        assert edited['remark']=='Edited in panel' and edited['internalSquads']['squads']==[]
+        assert len([h for h in api.hosts() if any(t.startswith('REMNA_MULTI_') for t in h.raw['tags'])])==4
+        assert Path('/dev/shm/hysteria_key.pem').stat().st_mode & 0o077 == 0
+        print('PASS all protocol listeners, panel profile/squad/Host control, preserved public VLESS, idempotence and protected certificate key')
         run('ip','link','del','ry-host'); run('ip','netns','del','remna-ygg-ci')
     finally:
         peer.terminate();peer.wait(timeout=10);peer_log.close()
