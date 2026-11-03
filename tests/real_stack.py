@@ -187,14 +187,19 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         cert=ROOT/'.test-bin/hy2-cert.pem'; certkey=ROOT/'.test-bin/hy2-key.pem'
         run('openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=127.0.0.1',
             '-addext','subjectAltName=DNS:127.0.0.1,IP:127.0.0.1','-keyout',str(certkey),'-out',str(cert))
+        # Certbot lineage name deliberately differs from Host; no manual paths supplied.
+        lineage=Path('/etc/letsencrypt/live/ci-different-name-0001'); lineage.mkdir(parents=True,mode=0o700)
+        (lineage/'fullchain.pem').write_bytes(cert.read_bytes())
+        (lineage/'privkey.pem').write_bytes(certkey.read_bytes())
         multi_args=[sys.executable,str(ROOT/'multi.py'),'--yes','--no-ssh','--panel','http://127.0.0.1:3000',
                     '--node',node['uuid'],'--source-host',source['uuid'],'--name','Multi CI',
                     '--protocol','hy2','--protocol','grpc','--protocol','xhttp','--protocol','ygg',
                     '--squad',squad['uuid'],'--allow-ip','200:db8::111','--allow-ip','200:db8::333',
-                    '--allow-ip','300:db8:1:1::/64','--cert',str(cert),'--key',str(certkey),
+                    '--allow-ip','300:db8:1:1::/64',
                     '--peer',f'tcp://127.0.0.1:{peer_port}']
         subprocess.run(multi_args,check=True)
         state=json.loads(Path('/etc/remnawave-yggdrasil/multi-state.json').read_text())
+        assert json.loads(Path('/etc/remnawave-yggdrasil/cert-sync.json').read_text())['cert']==str(lineage/'fullchain.pem')
         actual=api.request('GET','/config-profiles/'+profile['uuid'])
         assert len(actual['config']['inbounds'])==5
         assert actual['config']['inbounds'][0]==raw

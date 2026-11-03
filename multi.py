@@ -20,7 +20,7 @@ import node as local
 import certificates
 import provision
 
-VERSION='0.2.0'
+VERSION='0.2.1'
 FILES=('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py')
 
 
@@ -61,7 +61,7 @@ def main():
     if args.result: result(); return
     local.preflight()
     if sys.stdin.isatty(): termios.tcflush(sys.stdin.fileno(),termios.TCIFLUSH)
-    say('\n  ╔══════════════════════════════════════════════════════╗\n  ║       Remnawave · дополнительные протоколы 0.2.0      ║\n  ╚══════════════════════════════════════════════════════╝','1;36')
+    say('\n  ╔══════════════════════════════════════════════════════╗\n  ║       Remnawave · дополнительные протоколы '+VERSION+'      ║\n  ╚══════════════════════════════════════════════════════╝','1;36')
     say('  Запускайте на VPS уже работающей ноды.\n  Базовый VLESS остаётся. Выберите дополнения: мы подготовим зависимости,\n  добавим inbound в профиль, Host и выбранные сквады через API.\n  Не нужен VPN Username и не нужно вручную вставлять JSON в панель.')
     old=json.loads((local.BASE/'multi-state.json').read_text()) if (local.BASE/'multi-state.json').exists() else {}
     args.ssh_port=args.ssh_port or old.get('ssh_port',22)
@@ -168,10 +168,15 @@ def main():
             raise Error('Для Hysteria2 требуется общий /dev/shm:/dev/shm в Compose ноды, как у eGames')
         if docker['Config'].get('User') not in ('','0','root','0:0'):
             raise Error('Hysteria2: эта версия ожидает root внутри контейнера для чтения ключа 600')
-        candidates=[p for p in Path('/etc/letsencrypt/live').glob('*/fullchain.pem') if p.parent.name==source.address]
-        cert=cert or (candidates[0] if len(candidates)==1 else None)
+        if not cert:
+            say('  Ищу действующий сертификат для '+source.address+' среди сертификатов Certbot…')
+            detected=certificates.discover(source.address)
+            if detected:
+                cert,detected_key=detected
+                key=key or detected_key
+                say('  Сертификат найден автоматически: '+str(cert),'32')
         if not cert and not args.yes:
-            say('  Hysteria2 нужен TLS-сертификат домена '+source.address+'.\n  Пример пути: /etc/letsencrypt/live/ваш-домен/fullchain.pem')
+            say('  Для Hysteria2 не найден действующий сертификат, подходящий домену '+source.address+'.\n  Это не сертификат для Yggdrasil: VLESS Reality его не требует.\n  Если сертификат установлен вне Certbot, укажите полный путь к fullchain.pem.\n  Имя папки может отличаться от домена, например pepegus.com или домен-0001.\n  Нужен сертификат с этим доменом в SAN или подходящий wildcard.\n  Пример пути: /etc/letsencrypt/live/ваш-домен/fullchain.pem')
             cert=Path(prompt('Путь к полному сертификату'))
         if not cert: raise Error('Укажите --cert и --key для Hysteria2')
         key=key or cert.parent/'privkey.pem'
