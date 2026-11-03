@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from api import API, Error
 from node import run
@@ -51,7 +52,11 @@ def main():
     print('CI: real backend API ready',flush=True)
     admin=api.request('POST','/auth/register',{'username':'ciadmin','password':'Aa1'+secrets.token_hex(20)})
     api.token=admin['accessToken']
-    generated=api.request('POST','/tokens',{'name':'Native Ygg CI','expiresInDays':1,'scopes':['*']})
+    # Only test bootstrap emulates the admin UI to mint a real API token.
+    request=urllib.request.Request(api.url+'/tokens',json.dumps({'name':'Native Ygg CI','expiresInDays':1,'scopes':['*']}).encode(),
+             headers={'Authorization':'Bearer '+api.token,'Content-Type':'application/json',
+                      'X-Remnawave-Client-Type':'browser','X-Forwarded-Proto':'https','X-Forwarded-For':'127.0.0.1'},method='POST')
+    with urllib.request.urlopen(request,timeout=20) as response: generated=json.load(response)['response']
     api.token=generated['token']
     os.environ['REMNAWAVE_API_TOKEN']=api.token
     keys=api.request('GET','/keygen')

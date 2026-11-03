@@ -118,10 +118,16 @@ def setup_ygg(peers: list[str], backup: Path) -> str:
         shutil.copy2(path, backup/'yggdrasil.conf')
         config = json.loads(run('yggdrasil','-useconffile',str(path),'-normaliseconf','-json'))
         # -normaliseconf clears AdminListen: restore only this original scalar.
-        match = re.search(r'(?m)^[ \t]*(?:AdminListen|"AdminListen")[ \t]*:[ \t]*("(?:[^"\\]|\\.)*"|[^\r\n]*)',original)
-        if match:
-            value = match.group(1).strip()
-            config['AdminListen'] = json.loads(value) if value.startswith('"') else re.split(r'\s+(?://|#)',value,maxsplit=1)[0].rstrip(',').strip()
+        try:
+            original_json=json.loads(original)
+        except json.JSONDecodeError:
+            original_json={}
+            match = re.search(r'(?m)^[ \t]*(?:AdminListen|"AdminListen")[ \t]*:[ \t]*("(?:[^"\\]|\\.)*"|[^\r\n]*)',original)
+            if match:
+                value = match.group(1).strip()
+                original_json['AdminListen']=json.loads(value) if value.startswith('"') else re.split(r'\s+(?://|#)',value,maxsplit=1)[0].rstrip(',').strip()
+        if 'AdminListen' in original_json: config['AdminListen']=original_json['AdminListen']
+
     else:
         config = json.loads(run('yggdrasil','-genconf','-json'))
     if peers:
@@ -131,7 +137,10 @@ def setup_ygg(peers: list[str], backup: Path) -> str:
     elif not config.get('Peers') and not any(config.get('InterfacePeers',{}).values()):
         config['Peers'] = PEERS
     if config.get('IfName') in (None,'','none','auto'):
-        config['IfName'] = 'ygg-remna'
+        previous=run('yggdrasil','-useconffile',str(path),'-address').strip()
+        interfaces=json.loads(run('ip','-j','-6','addr','show'))
+        previous_iface=next((i['ifname'] for i in interfaces if any(a.get('local')==previous for a in i['addr_info'])),None)
+        config['IfName'] = previous_iface or 'ygg-remna' 
     iface = config['IfName']
     if not re.fullmatch(r'[a-zA-Z0-9_.-]{1,15}', iface) or iface in ('lo','docker0'):
         raise Error('Неподдерживаемое имя интерфейса Yggdrasil')
