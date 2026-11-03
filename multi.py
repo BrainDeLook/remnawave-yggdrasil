@@ -47,7 +47,7 @@ def main():
     parser.add_argument('--allow-ip',action='append',default=[])
     parser.add_argument('--ssh-allow-ip',action='append',default=[])
     ssh=parser.add_mutually_exclusive_group(); ssh.add_argument('--ssh',action='store_true'); ssh.add_argument('--no-ssh',action='store_true')
-    parser.add_argument('--ssh-port',type=int,default=22)
+    parser.add_argument('--ssh-port',type=int)
     parser.add_argument('--ygg-port',type=int,default=1488)
     parser.add_argument('--cert',type=Path); parser.add_argument('--key',type=Path)
     parser.add_argument('--peer',action='append',default=[])
@@ -64,6 +64,7 @@ def main():
     say('\n  ╔══════════════════════════════════════════════════════╗\n  ║       Remnawave · дополнительные протоколы 0.2.0      ║\n  ╚══════════════════════════════════════════════════════╝','1;36')
     say('  Запускайте на VPS уже работающей ноды.\n  Базовый VLESS остаётся. Выберите дополнения: мы подготовим зависимости,\n  добавим inbound в профиль, Host и выбранные сквады через API.\n  Не нужен VPN Username и не нужно вручную вставлять JSON в панель.')
     old=json.loads((local.BASE/'multi-state.json').read_text()) if (local.BASE/'multi-state.json').exists() else {}
+    args.ssh_port=args.ssh_port or old.get('ssh_port',22)
     panel=args.panel or old.get('panel')
     if not panel and not args.yes:
         say('\n  Шаг 1 · Доступ к панели\n  URL — адрес страницы входа в Remnawave: https://panel.example.com.\n  Здесь НЕ адрес VPS ноды, не ссылка подписки и не секретная ссылка eGames.')
@@ -128,7 +129,8 @@ def main():
             if all(v.isdigit() and 1<=int(v)<=len(all_squads) for v in answer):
                 grants[p]=list(dict.fromkeys(all_squads[int(v)-1]['uuid'] for v in answer)); break
             say('  Выберите номера из списка или нажмите Enter.','31')
-    allowed=[]; ssh_allowed=[]; ssh_enabled=False
+    # Omitting Yggdrasil means leave it alone, including the saved SSH/access state.
+    allowed=old.get('allowed',[]); ssh_allowed=old.get('ssh_allowed',[]); ssh_enabled=old.get('ssh',False)
     if 'ygg' in protocols:
         say('\n  Шаг 5 · Yggdrasil: сеть и SSH\n  Сквад разрешает VPN-учётку, а эти адреса — устройства, которым VPS\n  разрешает подключаться по сети. Для доступа нужны оба разрешения.\n  На OpenWrt: Сеть → Интерфейсы → Yggdrasil.\n  IPv6 200:…/7 → копируйте БЕЗ /7 (сам роутер и Тахион).\n  IPv6-PD 300:…/64 → копируйте С /64 (вся LAN, включая меняющиеся IP ПК).\n  Отдельный IP ПК из этой LAN не требуется. Адрес VPS сюда НЕ вводите.\n  Можно несколько адресов роутеров и несколько подсетей друзей через пробел.')
         ssh_enabled=args.ssh or (old.get('ssh',False) and not args.no_ssh)
