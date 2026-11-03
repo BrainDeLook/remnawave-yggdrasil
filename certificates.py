@@ -1,7 +1,9 @@
 """Selected Hysteria2 certificate copy, boot/renewal sync; no world-readable key."""
 import json
+import os
 from pathlib import Path
 import shutil
+import tempfile
 from api import Error
 from node import APP, BASE, run, write
 
@@ -15,7 +17,13 @@ def sync():
         if target.is_symlink(): raise Error('Путь сертификата /dev/shm занят символической ссылкой')
         content=source.read_bytes()
         if not target.exists() or target.read_bytes()!=content:
-            write(target,content.decode(),mode); changed=True
+            # /dev/shm is shared and writable: a predictable .new filename could be
+            # planted as a symlink. Create our own 0600 file and replace atomically.
+            with tempfile.NamedTemporaryFile(dir=target.parent,prefix='.remna-hy2-',delete=False) as temporary:
+                os.fchmod(temporary.fileno(),mode)
+                temporary.write(content)
+            os.replace(temporary.name,target)
+            changed=True
         target.chmod(mode)
     if changed: run('docker','restart','remnanode',timeout=120)
 
