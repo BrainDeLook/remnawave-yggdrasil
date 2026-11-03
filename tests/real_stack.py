@@ -109,6 +109,10 @@ def main():
         second=json.loads(Path('/etc/remnawave-yggdrasil/state.json').read_text())
         assert first['host_uuid']==second['host_uuid']
         assert first['address']==second['address']
+        run('systemctl','restart','yggdrasil')
+        time.sleep(2)
+        verify(export(raw,dict(source,address=second['address']),user)[1])
+        print('PASS ordinary Yggdrasil service restart, not just installer rerun')
         assert snapshot['profile']==api.request('GET','/config-profiles/'+profile['uuid'])['config']
         assert snapshot['source']==api.request('GET','/hosts/'+source['uuid'])
         assert snapshot['containers']==run('docker','inspect','--format','{{.Id}} {{.State.StartedAt}}','remnanode','test-remnawave')

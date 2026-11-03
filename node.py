@@ -159,10 +159,6 @@ ExecStart=/usr/bin/python3 {APP}/main.py --network-only
 [Install]
 WantedBy=multi-user.target
 ''',0o644)
-    write(Path('/etc/systemd/system/yggdrasil.service.d/remna-ygg.conf'),'''[Unit]
-Requires=remna-ygg-network.service
-After=remna-ygg-network.service
-''',0o644)
     mode = path.stat().st_mode & 0o777 if path.exists() else 0o640
     write(path,json.dumps(config,indent=2)+'\n',mode)
     # Preserve package group ownership even though atomic replacement creates a new inode.
@@ -171,6 +167,15 @@ After=remna-ygg-network.service
         shutil.chown(path,group='yggdrasil')
     address = run('yggdrasil','-useconffile',str(path),'-address').strip()
     write(BASE/'network.json',json.dumps({'interface':iface,'user':user,'address':address}))
+    # Runs on EVERY daemon start, including systemctl restart and crash recovery.
+    # Flush only this exact address; persistent TUN and unrelated addresses survive.
+    ip_binary=shutil.which('ip')
+    write(Path('/etc/systemd/system/yggdrasil.service.d/remna-ygg.conf'),f'''[Unit]
+Requires=remna-ygg-network.service
+After=remna-ygg-network.service
+[Service]
+ExecStartPre=+{ip_binary} -6 addr flush dev {iface} to {address}/128
+''',0o644)
     run('systemctl','daemon-reload')
     run('systemctl','enable','remna-ygg-network','yggdrasil')
     run('systemctl','stop','yggdrasil')
@@ -201,12 +206,6 @@ def network_only():
         raise Error('Интерфейс Yggdrasil занят другим типом устройства')
     for interface in ('lo',iface):
         Path('/proc/sys/net/ipv6/conf',interface,'disable_ipv6').write_text('0\n')
-    # Persistent TUN survives a daemon restart; Yggdrasil AddrAdd is not idempotent.
-    # Remove its own prior address only, retaining unrelated manually added addresses.
-    for interface in json.loads(run('ip','-j','-6','addr','show','dev',iface)):
-        for address in interface['addr_info']:
-            if address.get('local')==config['address']:
-                run('ip','-6','addr','del',address['local']+'/'+str(address['prefixlen']),'dev',iface)
     run('ip','link','set','dev',iface,'up')
 
 
