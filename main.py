@@ -16,7 +16,7 @@ import socket
 import subprocess
 import sys
 import termios
-from uuid import UUID
+from urllib.parse import quote
 
 from api import API, Error, Host, Node, eligible, host_payload, obj, string, upsert
 import node as local
@@ -97,7 +97,7 @@ def main():
     parser.add_argument('--ssh-allow-ip',action='append',default=[])
     group=parser.add_mutually_exclusive_group(); group.add_argument('--ssh',action='store_true'); group.add_argument('--no-ssh',action='store_true')
     parser.add_argument('--ssh-port',type=int,default=None)
-    parser.add_argument('--user-uuid',help='UUID пользователя панели для полной HTTPS-проверки и личной ссылки')
+    parser.add_argument('--user',help='имя пользователя панели для полной HTTPS-проверки и личной ссылки')
     parser.add_argument('--peer',action='append',default=[])
     parser.add_argument('--yes',action='store_true')
     parser.add_argument('--check',action='store_true',help='только API/план, без изменений')
@@ -149,10 +149,10 @@ def main():
     ssh_port=args.ssh_port or old.get('ssh_port',22)
     if not 1<=ssh_port<=65535 or source.port in (22,ssh_port) or ssh_port==2222:
         raise Error('Порт VLESS и SSH должны различаться; 2222 зарезервирован для API Remnanode')
-    user_uuid=args.user_uuid
-    if not args.yes and not user_uuid:
-        user_uuid=prompt('UUID пользователя панели для проверки/личной ссылки (Enter — пропустить)') or None
-    user=obj(api.request('GET','/users/'+str(UUID(user_uuid)))) if user_uuid else None
+    username=args.user
+    if not args.yes and not username:
+        username=prompt('Имя пользователя панели для проверки/личной ссылки (Enter — пропустить)') or None
+    user=obj(api.request('GET','/users/by-username/'+quote(username,safe=''))) if username else None
     # Plan and all API validation happen before package installation or firewall changes.
     host_payload(selected,source,raw,'200::1',name)
     if args.check:

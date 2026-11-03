@@ -137,10 +137,10 @@ def setup_ygg(peers: list[str], backup: Path) -> str:
     elif not config.get('Peers') and not any(config.get('InterfacePeers',{}).values()):
         config['Peers'] = PEERS
     if config.get('IfName') in (None,'','none','auto'):
-        previous=run('yggdrasil','-useconffile',str(path),'-address').strip()
+        previous=run('yggdrasil','-useconffile',str(path),'-address').strip() if path.exists() else ''
         interfaces=json.loads(run('ip','-j','-6','addr','show'))
         previous_iface=next((i['ifname'] for i in interfaces if any(a.get('local')==previous for a in i['addr_info'])),None)
-        config['IfName'] = previous_iface or 'ygg-remna' 
+        config['IfName'] = previous_iface or 'ygg-remna'
     iface = config['IfName']
     if not re.fullmatch(r'[a-zA-Z0-9_.-]{1,15}', iface) or iface in ('lo','docker0'):
         raise Error('Неподдерживаемое имя интерфейса Yggdrasil')

@@ -102,7 +102,7 @@ def main():
         args=[sys.executable,str(ROOT/'main.py'),'--yes','--no-ssh','--panel','http://127.0.0.1:3000',
               '--node',node['uuid'],'--source-host',source['uuid'],'--name','NL Ygg CI',
               '--allow-ip','200:db8::111','--allow-ip','200:db8::333','--allow-ip','300:db8:1:1::/64',
-              '--user-uuid',user['uuid'],'--peer',f'tcp://127.0.0.1:{peer_port}']
+              '--user',user['username'],'--peer',f'tcp://127.0.0.1:{peer_port}']
         subprocess.run(args,check=True)
         first=json.loads(Path('/etc/remnawave-yggdrasil/state.json').read_text())
         subprocess.run(args,check=True)

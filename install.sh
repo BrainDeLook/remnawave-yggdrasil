@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 VERSION=v0.1.0
-BUNDLE_SHA256=78feb6ccd5f2188366889bfd3349d2be9e97f8b59262d55fe5d440e79ca20b0e
+BUNDLE_SHA256=d4aa105d82000a685a73479835f7e3268bcdcadce836be0e696a45d080cb8ff2
 URL="https://github.com/BrainDeLook/remnawave-yggdrasil/releases/download/$VERSION/remnawave-yggdrasil-$VERSION.tar"
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     printf '%s\n' 'Remnawave + Yggdrasil: запуск на VPS действующей ноды.' \
