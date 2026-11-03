@@ -1,10 +1,11 @@
 from pathlib import Path
+import json
 import subprocess
 import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
-from certificates import discover, validate
+from certificates import CertificatePair, configured_targets, configured_pair, discover, managed_targets, setup, sync, validate
 from api import Error
 
 
@@ -62,5 +63,61 @@ class CertificateDiscoveryTests(unittest.TestCase):
             path=Path(directory)/'wrong-domain'; path.mkdir()
             (path/'fullchain.pem').touch(); (path/'privkey.pem').touch()
             with patch('certificates.subprocess.run',side_effect=self.check): self.assertIsNone(discover('node.example.com',Path(directory)))
+
+class CertificateCoexistenceTests(unittest.TestCase):
+    def test_existing_inbound_uses_its_actual_longest_mount_and_does_not_write(self):
+        inbound={'streamSettings':{'tlsSettings':{'certificates':[{
+            'certificateFile':'/certs/node/fullchain.pem','keyFile':'/certs/node/privkey.pem'}]}}}
+        mounts=[{'Source':'/unrelated','Destination':'/certs'},
+                {'Source':'/etc/letsencrypt/live/node-0001','Destination':'/certs/node','RW':False}]
+        pair=CertificatePair(Path('/etc/letsencrypt/live/node-0001/fullchain.pem'),
+                             Path('/etc/letsencrypt/live/node-0001/privkey.pem'),'node.example.com')
+        with patch('certificates.validate',return_value=pair) as checked, patch('certificates.write') as written:
+            self.assertEqual(configured_pair(configured_targets(inbound),mounts,'node.example.com'),pair)
+        checked.assert_called_once_with(pair.cert,pair.key,'node.example.com')
+        written.assert_not_called()
+
+    def test_existing_certificate_without_a_host_mount_is_rejected_before_setup(self):
+        inbound={'streamSettings':{'tlsSettings':{'certificates':[{
+            'certificateFile':'/private/fullchain.pem','keyFile':'/private/privkey.pem'}]}}}
+        with self.assertRaisesRegex(Error,'mount'):
+            configured_pair(configured_targets(inbound),[{'Source':'/dev/shm','Destination':'/dev/shm'}],'node.example.com')
+
+    def test_new_writer_uses_dedicated_names_and_preserves_upstream_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            upstream_cert=root/'hysteria_cert.pem'; upstream_key=root/'hysteria_key.pem'
+            upstream_cert.write_text('upstream cert'); upstream_key.write_text('upstream key')
+            cert=root/'source-cert.pem'; key=root/'source-key.pem'
+            cert.write_text('new cert'); key.write_text('new key')
+            target_cert=root/'remna-ygg-hy2-cert.pem'; target_key=root/'remna-ygg-hy2-key.pem'
+            (root/'cert-sync.json').write_text(json.dumps({'cert':str(cert),'key':str(key),
+                'domain':'node.example.com','cert_target':str(target_cert),'key_target':str(target_key)}))
+            with patch('certificates.BASE',root), patch('certificates.validate'), \
+                 patch('certificates.os.fchmod',create=True), patch('certificates.run') as run:
+                sync()
+                run.assert_called_once_with('docker','restart','remnanode',timeout=120)
+                run.reset_mock()
+                sync()
+                run.assert_not_called()
+            self.assertEqual(target_cert.read_text(),'new cert'); self.assertEqual(target_key.read_text(),'new key')
+            self.assertEqual(upstream_cert.read_text(),'upstream cert'); self.assertEqual(upstream_key.read_text(),'upstream key')
+
+    def test_setup_records_dedicated_targets_and_legacy_writer_is_identified(self):
+        pair=CertificatePair(Path('/certs/fullchain.pem'),Path('/certs/privkey.pem'),'node.example.com')
+        with patch('certificates.write') as written, patch('certificates.sync'), patch('certificates.run'):
+            setup(pair)
+        state=json.loads(written.call_args_list[0].args[1])
+        self.assertEqual(Path(state['cert_target']),Path('/dev/shm/remna-ygg-hy2-cert.pem'))
+        self.assertEqual(Path(state['key_target']),Path('/dev/shm/remna-ygg-hy2-key.pem'))
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            with patch('certificates.BASE',root):
+                self.assertIsNone(managed_targets())
+                (root/'cert-sync.json').write_text(json.dumps({'cert':'/certs/fullchain.pem','key':'/certs/privkey.pem'}))
+                self.assertEqual(managed_targets(),(Path('/dev/shm/hysteria_cert.pem'),Path('/dev/shm/hysteria_key.pem')))
+                (root/'cert-sync.json').write_text(json.dumps(state))
+                self.assertEqual(managed_targets(),(Path(state['cert_target']),Path(state['key_target'])))
+
 
 if __name__=='__main__': unittest.main()

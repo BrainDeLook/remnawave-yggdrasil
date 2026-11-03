@@ -13,7 +13,7 @@ import time
 import urllib.request
 import urllib.parse
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from api import API, Error
+from api import API, Error, Node
 from node import run
 from probe import export, verify
 ROOT=Path(__file__).resolve().parents[1]
@@ -76,25 +76,86 @@ def main():
          'configProfile':{'activeConfigProfileUuid':profile['uuid'],'activeInbounds':[inbound]}})
     wait(lambda: next((n for n in api.nodes() if n.uuid==node['uuid']),None))
     print('CI: real Remnanode connected',flush=True)
+    # Real neighbours distinguish profile-wide reloads from changes to node bindings.
+    # Docker bridge isolates their Xray listeners while the panel reaches both APIs.
+    for container,api_port,proxy_port in [('remnanode-shared-ci',2224,2443),('remnanode-other-ci',2225,2444)]:
+        run('docker','run','-d','--name',container,'-p',f'127.0.0.1:{api_port}:2222',
+            '-p',f'127.0.0.1:{proxy_port}:443','-e','NODE_PORT=2222','-e','SECRET_KEY',
+            'remnawave/node:latest',timeout=300)
+    shared_node=api.request('POST','/nodes',{'name':'Same profile neighbour','address':'127.0.0.1','port':2224,
+         'configProfile':{'activeConfigProfileUuid':profile['uuid'],'activeInbounds':[inbound]}})
+    other_raw=dict(raw,tag='VLESS_UNRELATED_CI')
+    other_profile=api.request('POST','/config-profiles',{'name':'Unrelated profile','config':{
+        'log':{'loglevel':'error'},'inbounds':[other_raw],
+        'outbounds':[{'protocol':'freedom','tag':'UNRELATED_DIRECT'}]}})
+    other_inbound=other_profile['inbounds'][0]['uuid']
+    unrelated_node=api.request('POST','/nodes',{'name':'Different profile neighbour','address':'127.0.0.1','port':2225,
+         'configProfile':{'activeConfigProfileUuid':other_profile['uuid'],'activeInbounds':[other_inbound]}})
+    wait(lambda: {shared_node['uuid'],unrelated_node['uuid']} <= {n.uuid for n in api.nodes()})
     squad=api.request('POST','/internal-squads',{'name':'Native Ygg CI','inbounds':[inbound]})
     user=api.request('POST','/users',{'username':'ygg-ci-user','expireAt':(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=1)).isoformat(),
             'activeInternalSquads':[squad['uuid']]})
     source=api.request('POST','/hosts',{'inbound':{'configProfileUuid':profile['uuid'],'configProfileInboundUuid':inbound},
         'remark':'Original public','address':'127.0.0.1','port':443,'sni':'www.microsoft.com','fingerprint':'chrome',
         'nodes':[node['uuid']],'internalSquads':{'mode':'ALLOW_ONLY','squads':[squad['uuid']]}})
+    other=api.request('POST','/internal-squads',{'name':'Old inbound only','inbounds':[inbound]})
+    restricted=api.request('POST','/users',{'username':'old-inbound-only',
+               'expireAt':(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=1)).isoformat(),
+               'activeInternalSquads':[other['uuid']]})
+    shared_source=api.request('POST','/hosts',{'inbound':{'configProfileUuid':profile['uuid'],'configProfileInboundUuid':inbound},
+        'remark':'Same profile public','address':'127.0.0.1','port':2443,'sni':'www.microsoft.com','fingerprint':'chrome',
+        'nodes':[shared_node['uuid']],'internalSquads':{'mode':'ALLOW_ONLY','squads':[other['uuid']]}})
+    unrelated_squad=api.request('POST','/internal-squads',{'name':'Unrelated profile only','inbounds':[other_inbound]})
+    unrelated_user=api.request('POST','/users',{'username':'unrelated-profile-only',
+               'expireAt':(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=1)).isoformat(),
+               'activeInternalSquads':[unrelated_squad['uuid']]})
+    unrelated_source=api.request('POST','/hosts',{'inbound':{
+        'configProfileUuid':other_profile['uuid'],'configProfileInboundUuid':other_inbound},
+        'remark':'Different profile public','address':'127.0.0.1','port':2444,'sni':'www.microsoft.com','fingerprint':'chrome',
+        'nodes':[unrelated_node['uuid']],'internalSquads':{'mode':'ALLOW_ONLY','squads':[unrelated_squad['uuid']]}})
     # Wait until the node receives its new user, then prove the public service works first.
     time.sleep(8)
     _,original_client=export(raw,source,user); verify(original_client)
+    shared_client=export(raw,shared_source,restricted)[1]
+    unrelated_client=export(other_raw,unrelated_source,unrelated_user)[1]
+    verify(shared_client); verify(unrelated_client)
     snapshot={'profile':api.request('GET','/config-profiles/'+profile['uuid'])['config'],
               'source':api.request('GET','/hosts/'+source['uuid']),
               'containers':run('docker','inspect','--format','{{.Id}} {{.State.StartedAt}}','remnanode','test-remnawave'),
               'docker_nat':run('iptables','-t','nat','-S','DOCKER')}
+    neighbours={'nodes':{n['uuid']:Node.parse(api.request('GET','/nodes/'+n['uuid']))
+                         for n in (shared_node,unrelated_node)},
+                'profile':api.request('GET','/config-profiles/'+other_profile['uuid'])['config'],
+                'hosts':{h['uuid']:api.request('GET','/hosts/'+h['uuid']) for h in (shared_source,unrelated_source)},
+                'squads':{s['uuid']:api.request('GET','/internal-squads/'+s['uuid']) for s in (other,unrelated_squad)},
+                'containers':run('docker','inspect','--format','{{.Id}} {{.State.StartedAt}}',
+                                 'remnanode-shared-ci','remnanode-other-ci')}
+
+    def verify_neighbours():
+        for identifier,expected in neighbours['nodes'].items():
+            actual=wait(lambda: next((n for n in api.nodes() if n.uuid==identifier),None))
+            assert actual==expected,'A neighbouring node binding changed'
+        assert api.request('GET','/config-profiles/'+other_profile['uuid'])['config']==neighbours['profile']
+        for identifier,expected in neighbours['hosts'].items():
+            assert api.request('GET','/hosts/'+identifier)==expected,'A neighbouring Host changed'
+        for identifier,expected in neighbours['squads'].items():
+            assert api.request('GET','/internal-squads/'+identifier)==expected,'An unrelated squad changed'
+        assert neighbours['containers']==run('docker','inspect','--format','{{.Id}} {{.State.StartedAt}}',
+                                             'remnanode-shared-ci','remnanode-other-ci')
+        verify(shared_client); verify(unrelated_client)
+        for neighbour_user in (restricted,unrelated_user):
+            links=api.request('GET','/subscriptions/by-username/'+neighbour_user['username'])['links']
+            names={urllib.parse.unquote(urllib.parse.urlsplit(link).fragment) for link in links}
+            assert not any(h.name in names for h in api.hosts()
+                           if any(tag.startswith('REMNA_MULTI_') for tag in h.raw.get('tags',[])))
+        print('PASS neighbouring nodes: shared-profile bindings and separate profile/Hosts/squads unchanged; both HTTPS services work',flush=True)
     peer_config=json.loads(run(str(ROOT/'.test-bin/ygg/usr/bin/yggdrasil'),'-genconf','-json'))
     with socket.socket() as s: s.bind(('127.0.0.1',0)); peer_port=s.getsockname()[1]
     peer_config.update(IfName='none',AdminListen='none',Peers=[],MulticastInterfaces=[],Listen=[f'tcp://127.0.0.1:{peer_port}'])
     peer_file=ROOT/'.test-bin/peer.json'; peer_file.write_text(json.dumps(peer_config))
     peer_log=open(ROOT/'.test-bin/peer.log','w')
     peer=subprocess.Popen([str(ROOT/'.test-bin/ygg/usr/bin/yggdrasil'),'-useconffile',str(peer_file)],stdout=peer_log,stderr=peer_log)
+    foreign_ssh=None
     try:
         run('ufw','allow','443/tcp')
         run('ufw','--force','enable')
@@ -183,6 +244,14 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         assert snapshot['profile']==api.request('GET','/config-profiles/'+profile['uuid'])['config']
         verify(public_client)
         print('PASS SSH key login and disable; original public VLESS and containers preserved')
+        # An existing SSH daemon on a custom port must also respect --no-ssh.
+        run('ufw','allow','2226/tcp')
+        foreign_ssh_log=open(ROOT/'.test-bin/existing-sshd.log','w')
+        foreign_ssh=subprocess.Popen(['/usr/sbin/sshd','-D','-e','-p','2226','-o','ListenAddress=::',
+                                     '-o','PidFile=/run/ci-existing-sshd.pid'],stdout=foreign_ssh_log,stderr=foreign_ssh_log)
+        time.sleep(1)
+        with socket.create_connection((address,2226),timeout=3) as existing_ssh:
+            assert existing_ssh.recv(256).startswith(b'SSH-')
         # New panel-managed mode: real profile append, independent squads, all transports.
         cert=ROOT/'.test-bin/hy2-cert.pem'; certkey=ROOT/'.test-bin/hy2-key.pem'
         run('openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=127.0.0.1',
@@ -191,6 +260,10 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         lineage=Path('/etc/letsencrypt/live/ci-different-name-0001'); lineage.mkdir(parents=True,mode=0o700)
         (lineage/'fullchain.pem').write_bytes(cert.read_bytes())
         (lineage/'privkey.pem').write_bytes(certkey.read_bytes())
+        upstream_cert=Path('/dev/shm/hysteria_cert.pem'); upstream_key=Path('/dev/shm/hysteria_key.pem')
+        upstream_cert.write_bytes(cert.read_bytes()); upstream_key.write_bytes(certkey.read_bytes())
+        upstream_key.chmod(0o600)
+        upstream_before=(upstream_cert.read_bytes(),upstream_key.read_bytes())
         multi_args=[sys.executable,str(ROOT/'multi.py'),'--yes','--no-ssh','--panel','http://127.0.0.1:3000',
                     '--node',node['uuid'],'--source-host',source['uuid'],'--name','Multi CI',
                     '--protocol','hy2','--protocol','grpc','--protocol','xhttp','--protocol','ygg',
@@ -200,6 +273,7 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         subprocess.run(multi_args,check=True)
         state=json.loads(Path('/etc/remnawave-yggdrasil/multi-state.json').read_text())
         assert json.loads(Path('/etc/remnawave-yggdrasil/cert-sync.json').read_text())['cert']==str(lineage/'fullchain.pem')
+        assert (upstream_cert.read_bytes(),upstream_key.read_bytes())==upstream_before
         actual=api.request('GET','/config-profiles/'+profile['uuid'])
         assert len(actual['config']['inbounds'])==5
         assert actual['config']['inbounds'][0]==raw
@@ -236,14 +310,10 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
             verify(public_client,outbound_override=outbound)
             print('PASS HTTPS through subscribed '+protocol+' transport',flush=True)
         # A distinct squad with only the old inbound must not acquire any new inbound.
-        other=api.request('POST','/internal-squads',{'name':'Old inbound only','inbounds':[inbound]})
         assert len(api.request('GET','/internal-squads/'+other['uuid'])['inbounds'])==1
         own=api.request('GET','/internal-squads/'+squad['uuid'])
         assert len(own['inbounds'])==5
         # An owner with only the original inbound receives none of the new Hosts.
-        restricted=api.request('POST','/users',{'username':'old-inbound-only',
-                   'expireAt':(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=1)).isoformat(),
-                   'activeInternalSquads':[other['uuid']]})
         restricted_links=api.request('GET','/subscriptions/by-username/'+restricted['username'])['links']
         restricted_names=[urllib.parse.unquote(urllib.parse.urlsplit(link).fragment) for link in restricted_links]
         assert not any(h['name'] in restricted_names for h in state['hosts'])
@@ -263,11 +333,18 @@ print('PASS dedicated Ygg port: owner can connect only to Ygg address, other int
         # A manual Host edit is authoritative, including independent access restrictions.
         api.request('PATCH','/hosts',{'uuid':ygg_host['host_uuid'],'remark':'Edited in panel',
                     'internalSquads':{'mode':'ALLOW_ONLY','squads':[other['uuid']]}})
+        for host in state['hosts']:
+            if host['protocol'] in ('grpc','xhttp'):
+                from converter import LABELS
+                api.request('PATCH','/hosts',{'uuid':host['host_uuid'],'remark':'Multi CI · '+LABELS[host['protocol']]})
         subprocess.run(multi_args,check=True)
+        for host in state['hosts']:
+            if host['protocol'] in ('grpc','xhttp'):
+                assert api.request('GET','/hosts/'+host['host_uuid'])['remark']=='Multi CI '+host['protocol'].upper()
         edited=api.request('GET','/hosts/'+ygg_host['host_uuid'])
         assert edited['remark']=='Edited in panel' and edited['internalSquads']['squads']==[other['uuid']]
         assert len([h for h in api.hosts() if any(t.startswith('REMNA_MULTI_') for t in h.raw['tags'])])==4
-        assert Path('/dev/shm/hysteria_key.pem').stat().st_mode & 0o077 == 0
+        assert Path('/dev/shm/remna-ygg-hy2-key.pem').stat().st_mode & 0o077 == 0
         print('PASS all protocol listeners, panel profile/squad/Host control, preserved public VLESS, idempotence and protected certificate key')
         # Multi-mode regression: previously saved nonempty SSH ACL survived --no-ssh.
         multi_ssh_args=[a if a!='--no-ssh' else '--ssh' for a in multi_args]+[
@@ -295,7 +372,7 @@ print('PASS dedicated Ygg port: owner can connect only to Ygg address, other int
         assert opened['access_mode']=='subscription' and opened['allowed']==[] and not opened['ssh_allowed']
         mode_check="""import socket,sys
 for target,port,expected in [(sys.argv[1],1488,True),(sys.argv[1],443,False),
-                              (sys.argv[1],22,False),('200:db8::ffff',1488,False)]:
+                              (sys.argv[1],22,False),(sys.argv[1],2226,False),('200:db8::ffff',1488,False)]:
  with socket.socket(socket.AF_INET6,socket.SOCK_STREAM) as s:
   s.settimeout(3);s.bind(('200:db8::222',0))
   try:s.connect((target,port));connected=True
@@ -318,8 +395,25 @@ print('PASS subscription mode: unlisted Ygg source allowed, legacy/SSH/other des
         closed=json.loads(Path('/etc/remnawave-yggdrasil/multi-state.json').read_text())
         assert closed['access_mode']=='restricted' and closed['allowed']==state['allowed']
         print('PASS subscription authentication, saved mode and restoration of restricted ACL',flush=True)
+        # Reuse a pre-existing Hy2 certificate manager without taking over its files.
+        current=api.request('GET','/config-profiles/'+profile['uuid'])
+        hy2=next(i for i in current['config']['inbounds'] if i['protocol']=='hysteria')
+        hy2['streamSettings']['tlsSettings']['certificates']=[{
+            'certificateFile':str(upstream_cert),'keyFile':str(upstream_key)}]
+        api.request('PATCH','/config-profiles',{'uuid':profile['uuid'],'config':current['config']})
+        wait(lambda: next((n for n in api.nodes() if n.uuid==node['uuid']),None))
+        started=run('docker','inspect','--format','{{.State.StartedAt}}','remnanode')
+        subprocess.run(multi_args,check=True)
+        assert run('docker','inspect','--format','{{.State.StartedAt}}','remnanode')==started
+        assert (upstream_cert.read_bytes(),upstream_key.read_bytes())==upstream_before
+        assert run('systemctl','is-active','remna-hy2-certs.timer',check=False).strip()!='active'
+        assert api.request('GET','/config-profiles/'+profile['uuid'])['config']==current['config']
+        print('PASS reused Hysteria2: configured certificate/manager preserved, no unnecessary container restart',flush=True)
+        verify_neighbours()
         run('ip','link','del','ry-host'); run('ip','netns','del','remna-ygg-ci')
     finally:
+        if foreign_ssh is not None:
+            foreign_ssh.terminate(); foreign_ssh.wait(timeout=10); foreign_ssh_log.close()
         peer.terminate();peer.wait(timeout=10);peer_log.close()
 
 if __name__=='__main__': main()

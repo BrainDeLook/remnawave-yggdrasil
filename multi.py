@@ -12,14 +12,14 @@ import subprocess
 import sys
 import termios
 import time
-from api import API, AccessRequired, Error, obj
-from converter import Profile, convert, LABELS
+from api import API, AccessRequired, Error, obj, seq, string, uid
+from converter import Profile, convert, LABELS, HOST_SUFFIXES
 from ui import say, prompt, choose, access, section, field, option, panel as frame, secret as secret_prompt, confirm
 import node as local
 import certificates
 import provision
 
-VERSION='0.2.3'
+VERSION='0.2.4'
 FILES=('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py','ui.py')
 
 
@@ -123,6 +123,8 @@ def main():
                and (not h.nodes or selected.uuid in h.nodes) and not h.raw.get('isDisabled') and not h.raw.get('isHidden')
                and not any(t.startswith('REMNA_MULTI_') or t=='YGGDRASIL_NATIVE' for t in h.raw.get('tags',[]))]
     profile=obj(api.request('GET','/config-profiles/'+selected.profile))
+    shared_nodes=[string(d,'name') for value in seq(profile['nodes'])
+                  if uid(d:=obj(value),'uuid')!=selected.uuid]
     typed=Profile.parse(profile['config'])
     base_ids={i.uuid for i in selected.inbounds if i.tag in typed.bases}
     source=choose([h for h in available if h.inbound in base_ids],args.source_host,old.get('source_host_uuid'),args.yes,'Исходный рабочий VLESS TCP Reality Host')
@@ -225,35 +227,59 @@ def main():
         listeners=local.run('ss','-H','-lnu' if protocol=='hy2' else '-lnt')
         if any(len(parts:=line.split())>=4 and parts[3].rpartition(':')[2]==str(port) for line in listeners.splitlines()):
             raise Error(f'Порт {port} уже слушает другой сервис. Настройки ещё не менялись; выберите другой порт/профиль.')
-    cert=args.cert; key=args.key
+    cert=args.cert; key=args.key; certificate_managed=False; retire_cert_writer=False
+    cert_targets=(certificates.CERT_TARGET,certificates.KEY_TARGET)
     if 'hy2' in protocols:
-        if not any(m['Destination']=='/dev/shm' and m['Source']=='/dev/shm' for m in docker['Mounts']):
-            raise Error('Для Hysteria2 требуется общий /dev/shm:/dev/shm в Compose ноды, как у eGames')
-        if docker['Config'].get('User') not in ('','0','root','0:0'):
-            raise Error('Hysteria2: эта версия ожидает root внутри контейнера для чтения ключа 600')
-        if not cert:
-            section(6,'Сертификат для Hysteria2')
-            say('  Проверяю существующие сертификаты Certbot. Мастер выберет тот,\n  который подходит домену Host и ещё действует.')
-            field('Домен Host',source.address)
-            detected=certificates.discover(source.address)
-            if detected:
-                cert,detected_key=detected
-                key=key or detected_key
-                field('Сертификат найден',str(cert))
-        if not cert and not args.yes:
-            say('  Подходящий действующий сертификат автоматически не найден.','warning')
-            say('  Он нужен только Hysteria2. Для VLESS Reality через Yggdrasil\n  TLS-сертификат не требуется. Если сертификат хранится вне Certbot,\n  введите путь к fullchain.pem. Имя папки может отличаться от домена.\n  Подойдёт сертификат этого домена или соответствующий wildcard.')
-            say('  Пример: /etc/letsencrypt/live/example.com/fullchain.pem','example')
-            cert=Path(prompt('Путь к полному сертификату'))
-        if not cert: raise Error('Укажите --cert и --key для Hysteria2')
-        key=key or cert.parent/'privkey.pem'
-        pair=certificates.validate(cert,key,source.address)
+        hy2=raw_by_tag[mapping['hy2']]
+        certificate_managed=hy2['tag'] not in old_tags
+        if not certificate_managed:
+            configured=certificates.configured_targets(hy2)
+            cert_targets=tuple(Path(v) for v in configured)
+            certificate_managed=cert_targets==certificates.managed_targets()
+            if not certificate_managed:
+                if cert or key: raise Error('Существующий Hysteria2 использует свой сертификат. --cert/--key не меняют его; настройте его прежним способом.')
+                pair=certificates.configured_pair(configured,docker['Mounts'],source.address)
+                retire_cert_writer=certificates.managed_targets() is not None
+                say('  Существующий Hysteria2: проверен его сертификат из mount контейнера.\n  Прежний способ обновления сертификата сохраняется.','success')
+            else:
+                saved=json.loads((local.BASE/'cert-sync.json').read_text())
+                cert=cert or Path(saved['cert']); key=key or Path(saved['key'])
+                # A private profile can safely move our old shared filenames to dedicated files.
+                # In a shared profile other nodes may still require the old paths.
+                if not shared_nodes and cert_targets==(certificates.LEGACY_CERT_TARGET,certificates.LEGACY_KEY_TARGET):
+                    cert_targets=(certificates.CERT_TARGET,certificates.KEY_TARGET)
+                    entry=hy2['streamSettings']['tlsSettings']['certificates'][0]
+                    entry.update(certificateFile=str(cert_targets[0]),keyFile=str(cert_targets[1]))
+                    say('  Наш прежний Hysteria2 перейдёт на отдельные файлы сертификата.','warning')
+        if certificate_managed:
+            if not any(m['Destination']=='/dev/shm' and m['Source']=='/dev/shm' and m['RW'] for m in docker['Mounts']):
+                raise Error('Для нового Hysteria2 требуется общий доступный для записи /dev/shm:/dev/shm в Compose ноды')
+            if docker['Config'].get('User') not in ('','0','root','0:0'):
+                raise Error('Новый Hysteria2: эта версия ожидает root внутри контейнера для чтения ключа 600')
+            if not cert:
+                section(6,'Сертификат для Hysteria2')
+                say('  Проверяю существующие сертификаты Certbot. Мастер выберет тот,\n  который подходит домену Host и ещё действует.')
+                field('Домен Host',source.address)
+                detected=certificates.discover(source.address)
+                if detected:
+                    cert,detected_key=detected
+                    key=key or detected_key
+                    field('Сертификат найден',str(cert))
+            if not cert and not args.yes:
+                say('  Подходящий действующий сертификат автоматически не найден.','warning')
+                say('  Он нужен только Hysteria2. Для VLESS Reality через Yggdrasil\n  TLS-сертификат не требуется. Если сертификат хранится вне Certbot,\n  введите путь к fullchain.pem. Имя папки может отличаться от домена.\n  Подойдёт сертификат этого домена или соответствующий wildcard.')
+                say('  Пример: /etc/letsencrypt/live/example.com/fullchain.pem','example')
+                cert=Path(prompt('Путь к полному сертификату'))
+            if not cert: raise Error('Укажите --cert и --key для Hysteria2')
+            key=key or cert.parent/'privkey.pem'
+            pair=certificates.validate(cert,key,source.address)
         field('Сертификат проверен',str(pair.cert))
     frame('ПЛАН ПРИМЕНЕНИЯ',[(selected.name+' · '+selected.address,'value'),('Профиль: '+profile['name'],'text')])
     for p,tag in mapping.items():
         names=[s['name'] for s in all_squads if s['uuid'] in grants[p]]
         say('\n  '+LABELS[p],'section')
         field('Inbound',tag)
+        field('Название нового Host',name+' '+HOST_SUFFIXES[p])
         field('Порт',str(raw_by_tag[tag]['port']))
         field('Добавить доступ сквадам',', '.join(names) or 'не добавлять')
         if not names: say('  Новый Host будет выключен; существующий Host сохранит настройки.','warning')
@@ -262,7 +288,14 @@ def main():
         if allowed: field('Устройства для VPN',' '.join(allowed))
         field('SSH через Yggdrasil','включён' if ssh_enabled else 'выключен')
         if ssh_enabled: field('Устройства для SSH',' '.join(ssh_allowed))
-    say('\n  Применение профиля может кратко перезагрузить Xray.','warning')
+    say('\n  Применение профиля и прав сквадов может кратко перезагрузить Xray.','warning')
+    if shared_nodes:
+        frame('Общий профиль — возможен перезапуск других нод',[
+            ('Этот профиль также используют: '+', '.join(shared_nodes),'warning'),
+            ('Remnawave может перезапустить Xray на всех нодах этого профиля.','text'),
+            ('Возможен короткий разрыв соединений. Их активные inbound сохраняются.','text'),
+            ('Для независимых изменений используйте отдельный профиль для ноды.','example')],'warning')
+        say('  Если выбран уже существующий inbound, право сквада действует на всех\n  нодах с этим inbound. Ограничение Host определяет показ в подписке;\n  оно не ограничивает применение уже выданных реквизитов одной нодой.','warning')
     say('  Если профиль общий, новые inbound активируются только на выбранной ноде.\n  Прежние inbound, Host и разрешения сохраняются. Отсутствие протокола\n  в текущем выборе не удаляет уже настроенное подключение.','muted')
     if args.check: say('\n  Проверка завершена. План корректен; рабочие настройки не применялись.','success'); return
     if not args.yes and not confirm('Применить показанный план?'):
@@ -301,11 +334,14 @@ def main():
         ufw=bool(shutil.which('ufw') and 'Status: active' in local.run('ufw','status'))
         for p,tag in mapping.items():
             if p!='ygg' and ufw: local.run('ufw','allow',str(raw_by_tag[tag]['port'])+('/udp' if p=='hy2' else '/tcp'))
-        if 'hy2' in protocols: certificates.setup(pair)
+        if certificate_managed: certificates.setup(pair,*cert_targets)
+        elif retire_cert_writer:
+            local.run('systemctl','disable','--now','remna-hy2-certs.timer')
+            local.run('systemctl','stop','remna-hy2-certs.service')
         section(3,'Применение: профиль, Host и сквады')
         # Root-only journal is useful if an API call times out after being applied.
         local.write(backup/'plan.json',json.dumps({'node':selected.uuid,'mapping':mapping,'grants':grants}))
-        provision.apply(api,selected,profile['config'],config,mapping,source,address,name,grants,backup)
+        provision.apply(api,selected,profile['config'],config,mapping,source,address,name,grants,backup,old.get('name'))
         current_profile=obj(api.request('GET','/config-profiles/'+selected.profile))
         tags={i['uuid']:i['tag'] for i in current_profile['inbounds']}
         inventory=[]

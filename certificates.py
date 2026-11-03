@@ -2,7 +2,8 @@
 import json
 import os
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import ssl
 import subprocess
@@ -10,6 +11,11 @@ import tempfile
 import time
 from api import Error
 from node import APP, BASE, run, write
+
+CERT_TARGET = Path('/dev/shm/remna-ygg-hy2-cert.pem')
+KEY_TARGET = Path('/dev/shm/remna-ygg-hy2-key.pem')
+LEGACY_CERT_TARGET = Path('/dev/shm/hysteria_cert.pem')
+LEGACY_KEY_TARGET = Path('/dev/shm/hysteria_key.pem')
 
 
 @dataclass(frozen=True)
@@ -59,12 +65,50 @@ def discover(domain: str, root: Path = Path('/etc/letsencrypt/live')) -> tuple[P
     return selected[2],selected[3]
 
 
+def configured_targets(inbound: dict) -> tuple[PurePosixPath, PurePosixPath]:
+    """Validate the existing TLS file paths once at the profile boundary."""
+    stream = inbound.get('streamSettings', {})
+    tls = stream.get('tlsSettings', {}) if isinstance(stream, dict) else {}
+    entries = tls.get('certificates', []) if isinstance(tls, dict) else []
+    if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
+        raise Error('Для проверки существующего Hysteria2 нужен один файловый TLS-сертификат в inbound')
+    targets = []
+    for key in ('certificateFile', 'keyFile'):
+        value = entries[0].get(key)
+        if not isinstance(value, str) or not value.startswith('/'):
+            raise Error('В существующем Hysteria2 не задан абсолютный путь '+key)
+        targets.append(PurePosixPath(posixpath.normpath(value)))
+    return targets[0], targets[1]
+
+
+def configured_pair(targets: tuple[PurePosixPath, PurePosixPath], mounts: list[dict], domain: str) -> CertificatePair:
+    """Read mounted certificate files without taking over their renewal."""
+    files = []
+    for container_path in targets:
+        mounted = [m for m in mounts if container_path.is_relative_to(PurePosixPath(m['Destination']))]
+        if not mounted:
+            raise Error('Файл Hysteria2 не доступен через mount контейнера: '+str(container_path))
+        mount = max(mounted, key=lambda m: len(PurePosixPath(m['Destination']).parts))
+        files.append(Path(mount['Source']) / container_path.relative_to(PurePosixPath(mount['Destination'])))
+    return validate(files[0], files[1], domain)
+
+
+def managed_targets() -> tuple[Path, Path] | None:
+    """Identify our existing writer; releases before 0.2.4 used shared filenames."""
+    path = BASE/'cert-sync.json'
+    if not path.exists():
+        return None
+    config = json.loads(path.read_text())
+    return Path(config.get('cert_target', LEGACY_CERT_TARGET)), Path(config.get('key_target', LEGACY_KEY_TARGET))
+
+
 def sync():
     config=json.loads((BASE/'cert-sync.json').read_text())
     # Renewal replaces source files independently of the installer; validate this read.
     validate(Path(config['cert']),Path(config['key']),config.get('domain'))
     changed=False
-    for key,destination,mode in (('cert','/dev/shm/hysteria_cert.pem',0o644),('key','/dev/shm/hysteria_key.pem',0o600)):
+    for key,destination,mode in (('cert',config.get('cert_target',str(LEGACY_CERT_TARGET)),0o644),
+                                 ('key',config.get('key_target',str(LEGACY_KEY_TARGET)),0o600)):
         source=Path(config[key]); target=Path(destination)
         if not source.is_file(): raise Error('Нет файла сертификата для Hysteria2: '+str(source))
         if target.is_symlink(): raise Error('Путь сертификата /dev/shm занят символической ссылкой')
@@ -81,8 +125,11 @@ def sync():
     if changed: run('docker','restart','remnanode',timeout=120)
 
 
-def setup(pair: CertificatePair):
-    write(BASE/'cert-sync.json',json.dumps({'cert':str(pair.cert),'key':str(pair.key),'domain':pair.domain}))
+def setup(pair: CertificatePair, cert_target: Path = CERT_TARGET, key_target: Path = KEY_TARGET):
+    if cert_target.parent != Path('/dev/shm') or key_target.parent != Path('/dev/shm') or cert_target == key_target:
+        raise Error('Назначение сертификата Hysteria2 должно быть отдельной парой файлов в /dev/shm')
+    write(BASE/'cert-sync.json',json.dumps({'cert':str(pair.cert),'key':str(pair.key),'domain':pair.domain,
+                                        'cert_target':str(cert_target),'key_target':str(key_target)}))
     write(Path('/etc/systemd/system/remna-hy2-certs.service'),f'''[Unit]
 Description=Remnanode Hysteria2 certificate sync
 After=docker.service

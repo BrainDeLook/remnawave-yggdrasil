@@ -11,6 +11,7 @@ class ConversionError(ValueError):
 
 LABELS = {'hy2':'Hysteria2', 'grpc':'VLESS gRPC Reality',
           'xhttp':'VLESS XHTTP Reality', 'ygg':'VLESS Reality Yggdrasil'}
+HOST_SUFFIXES = {'hy2':'Histeria', 'grpc':'GRPC', 'xhttp':'XHTTP', 'ygg':'Ygg'}
 PORTS = {'hy2':443, 'grpc':8443, 'xhttp':4443, 'ygg':1488}
 
 @dataclass(frozen=True)
@@ -22,6 +23,15 @@ class Profile:
     def parse(cls, value: object) -> Profile:
         if not isinstance(value, dict) or not isinstance(value.get('inbounds'), list):
             raise ConversionError('Нужен полный JSON профиля с массивом inbounds')
+        routing = value.get('routing', {})
+        if not isinstance(routing, dict) or not isinstance(routing.get('rules', []), list):
+            raise ConversionError('В routing ожидается объект с массивом rules')
+        for rule in routing.get('rules', []):
+            if not isinstance(rule, dict):
+                raise ConversionError('Правило routing должно быть объектом')
+            if 'inboundTag' in rule and (not isinstance(rule['inboundTag'], list) or
+                    not all(isinstance(tag, str) for tag in rule['inboundTag'])):
+                raise ConversionError('В routing inboundTag должен быть массивом строк')
         tags = set()
         bases = []
         for inbound in value['inbounds']:
@@ -57,6 +67,7 @@ def convert(profile: Profile, base_tag: str, protocols: list[str], ports: dict[s
     result = copy.deepcopy(profile.config)
     base = next(i for i in result['inbounds'] if i['tag']==base_tag)
     mapping = {}
+    created = []
     for protocol in dict.fromkeys(protocols):
         tag = base_tag+'-'+protocol if protocol!='ygg' else base_tag+'-yggdrasil'
         matches = [i for i in result['inbounds'] if i['tag']==tag]
@@ -87,7 +98,7 @@ def convert(profile: Profile, base_tag: str, protocols: list[str], ports: dict[s
                        'settings':{'clients':[],'version':2},'streamSettings':{
                            'network':'hysteria','security':'tls','hysteriaSettings':{'version':2},
                            'tlsSettings':{'alpn':['h3'],'certificates':[{
-                               'certificateFile':'/dev/shm/hysteria_cert.pem','keyFile':'/dev/shm/hysteria_key.pem'}]}}}
+                               'certificateFile':'/dev/shm/remna-ygg-hy2-cert.pem','keyFile':'/dev/shm/remna-ygg-hy2-key.pem'}]}}}
         else:
             inbound = copy.deepcopy(base)
             inbound.update(tag=tag,port=port,listen='::' if protocol=='ygg' else '0.0.0.0')
@@ -96,10 +107,18 @@ def convert(profile: Profile, base_tag: str, protocols: list[str], ports: dict[s
             for key in ('tcpSettings','rawSettings','grpcSettings','xhttpSettings','sockopt'):
                 stream.pop(key,None)
             stream['network']='tcp' if protocol=='ygg' else protocol
+            if protocol in ('grpc', 'xhttp'):
+                inbound['settings'].pop('flow', None)
             if protocol=='grpc': stream['grpcSettings']={'serviceName':tag.replace('-','_'),'multiMode':False}
             if protocol=='xhttp': stream['xhttpSettings']={'path':'/','mode':'auto'}
         result['inbounds'].append(inbound)
+        created.append(tag)
         mapping[protocol]=tag
+    # New VPN listeners inherit source-specific exit/blocking policies. Existing
+    # transports retain the policy the administrator has already set in the panel.
+    for rule in result.get('routing', {}).get('rules', []):
+        if base_tag in rule.get('inboundTag', []):
+            rule['inboundTag'].extend(tag for tag in created if tag not in rule['inboundTag'])
     return result,mapping
 
 

@@ -3,7 +3,7 @@ import copy
 import json
 from pathlib import Path
 from api import API, Error, Host, Node, obj, seq, string, uid
-from converter import LABELS
+from converter import LABELS, HOST_SUFFIXES
 
 
 def squads(api: API) -> list[dict]:
@@ -13,8 +13,12 @@ def squads(api: API) -> list[dict]:
 
 
 def apply(api: API, node: Node, before: dict, config: dict, mapping: dict[str,str],
-          source: Host, address: str, name: str, grants: dict[str,list[str]], backup: Path) -> list[dict]:
-    """Never rewrites existing hosts or revokes squad grants. Retry converges after interruption."""
+          source: Host, address: str, name: str, grants: dict[str,list[str]], backup: Path,
+          previous_name: str | None = None) -> list[dict]:
+    """Preserve panel edits; only migrate names that exactly match our generated format."""
+    selected=Node.parse(api.request('GET','/nodes/'+node.uuid),require_connected=False)
+    if selected.profile!=node.profile:
+        raise Error('Активный профиль ноды изменился. Настройки панели не менялись; повторите запуск.')
     current=obj(api.request('GET','/config-profiles/'+node.profile))
     if current['config'] != before:
         raise Error('Профиль изменился во время установки. Повторите запуск, чтобы сохранить чужие изменения.')
@@ -54,13 +58,18 @@ def apply(api: API, node: Node, before: dict, config: dict, mapping: dict[str,st
                 api.request('PATCH','/internal-squads',{'uuid':squad_uuid,'inbounds':inbounds+[identifier]})
         if existing:
             host=existing[0]
-            # Panel is the authority after creation. Do not undo manual SNI/name/access edits.
+            generated={prefix+separator+suffix for prefix in (name,previous_name or name)
+                       for separator,suffix in ((' · ',LABELS[protocol]),(' ',HOST_SUFFIXES[protocol]))}
+            remark=name+' '+HOST_SUFFIXES[protocol]
+            if host.name in generated and host.name!=remark:
+                host=Host.parse(api.request('PATCH','/hosts',{'uuid':host.uuid,'remark':remark}))
+            # Only the generated name may change; SNI, access and manual names remain authoritative.
             result.append(dict(protocol=protocol,tag=tag,host_uuid=host.uuid,name=host.name,address=host.address,port=host.port))
             continue
         stream=raw['streamSettings']
         sni=stream['realitySettings']['serverNames'][0] if protocol!='hy2' else source.address
         payload={'inbound':{'configProfileUuid':node.profile,'configProfileInboundUuid':identifier},
-                 'remark':name+' · '+LABELS[protocol], 'address':address if protocol=='ygg' else source.address,
+                 'remark':name+' '+HOST_SUFFIXES[protocol], 'address':address if protocol=='ygg' else source.address,
                  'port':raw['port'],'sni':sni,'fingerprint':'chrome' if protocol!='hy2' else None,
                  'nodes':[node.uuid],'tags':[marker],'isDisabled':not selected,'isHidden':False,
                  'overrideSniFromAddress':False,'keepSniBlank':False,

@@ -287,6 +287,12 @@ def firewall(address: str, port: int, allowed: list[str], ssh_port: int, ssh_all
     vpn_clients = ['200::/7'] if subscription else allowed
     legacy_clients = allowed if extra_allowed is None else extra_allowed
     legacy_ports = sorted(set(extra_vpn_ports)-{port})
+    ssh_ports={22,ssh_port}
+    if shutil.which('sshd'):
+        ssh_ports.update(int(line.split()[1]) for line in run('sshd','-T').splitlines() if line.startswith('port '))
+        for line in run('ss','-H','-lntp').splitlines():
+            if re.search(r'"sshd(?:-[^"]*)?"',line):
+                ssh_ports.add(int(line.split()[3].rpartition(':')[2]))
     ufw = bool(shutil.which('ufw') and 'Status: active' in run('ufw','status'))
     if ufw and not re.search(r'(?m)^IPV6=yes\s*$',Path('/etc/default/ufw').read_text()):
         raise Error('У активного UFW отключён IPv6. Включите поддержку IPv6 до установки.')
@@ -315,7 +321,7 @@ def firewall(address: str, port: int, allowed: list[str], ssh_port: int, ssh_all
   ip6 daddr {address} tcp dport {port} jump vpn
   {('ip6 daddr '+address+' tcp dport { '+', '.join(map(str,legacy_ports))+' } jump legacy') if legacy_ports else ''}
   {f'tcp dport {port} counter drop' if exclusive else ''}
-  ip6 daddr {address} tcp dport {{ {', '.join(map(str,sorted({22,ssh_port})))} }} jump ssh
+  ip6 daddr {address} tcp dport {{ {', '.join(map(str,sorted(ssh_ports)))} }} jump ssh
  }}
 }}
 '''
@@ -336,7 +342,7 @@ nft -f "$scratch"
     write(Path('/etc/systemd/system/remna-ygg-access.service'),f'''[Unit]
 Description=Remnanode Yggdrasil port access lists
 After=nftables.service ufw.service firewalld.service
-Before=remna-ygg-ssh.service
+Before=yggdrasil.service remna-ygg-ssh.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
