@@ -148,7 +148,6 @@ def setup_ygg(peers: list[str], backup: Path) -> str:
         config['AdminListen'] = 'unix:///var/run/yggdrasil/yggdrasil.sock'
     # Own pre-start unit enables IPv6 only on the TUN and loopback. WAN/default stay untouched.
     user = run('systemctl','show','yggdrasil','--property=User','--value').strip() or 'root'
-    write(BASE/'network.json',json.dumps({'interface':iface,'user':user}))
     write(Path('/etc/systemd/system/remna-ygg-network.service'),f'''[Unit]
 Description=IPv6 on the Yggdrasil interface
 After=systemd-sysctl.service
@@ -170,8 +169,11 @@ After=remna-ygg-network.service
     import grp
     if any(g.gr_name == 'yggdrasil' for g in grp.getgrall()):
         shutil.chown(path,group='yggdrasil')
+    address = run('yggdrasil','-useconffile',str(path),'-address').strip()
+    write(BASE/'network.json',json.dumps({'interface':iface,'user':user,'address':address}))
     run('systemctl','daemon-reload')
     run('systemctl','enable','remna-ygg-network','yggdrasil')
+    run('systemctl','stop','yggdrasil')
     run('systemctl','restart','remna-ygg-network')
     # Package post-install may have hit StartLimit before scoped IPv6 was prepared.
     run('systemctl','reset-failed','yggdrasil')
@@ -182,8 +184,8 @@ After=remna-ygg-network.service
     for _ in range(45):
         interfaces = json.loads(run('ip','-j','-6','addr','show'))
         assigned = any(a.get('local') == address for i in interfaces for a in i['addr_info'])
-        status = run('yggdrasilctl','-endpoint='+config['AdminListen'],'-json','getPeers',timeout=5,check=False)
-        if assigned and status and any(p.get('up') for p in json.loads(status).get('peers',[])):
+        status = subprocess.run(['yggdrasilctl','-endpoint='+config['AdminListen'],'-json','getPeers'],capture_output=True,text=True,timeout=5)
+        if assigned and status.returncode==0 and any(p.get('up') for p in json.loads(status.stdout).get('peers',[])):
             return address
         time.sleep(2)
     raise Error('Не появился адрес Yggdrasil или нет живых пиров; журнал: journalctl -u yggdrasil')
@@ -199,6 +201,12 @@ def network_only():
         raise Error('Интерфейс Yggdrasil занят другим типом устройства')
     for interface in ('lo',iface):
         Path('/proc/sys/net/ipv6/conf',interface,'disable_ipv6').write_text('0\n')
+    # Persistent TUN survives a daemon restart; Yggdrasil AddrAdd is not idempotent.
+    # Remove its own prior address only, retaining unrelated manually added addresses.
+    for interface in json.loads(run('ip','-j','-6','addr','show','dev',iface)):
+        for address in interface['addr_info']:
+            if address.get('local')==config['address']:
+                run('ip','-6','addr','del',address['local']+'/'+str(address['prefixlen']),'dev',iface)
     run('ip','link','set','dev',iface,'up')
 
 

@@ -108,6 +108,7 @@ def main():
         subprocess.run(args,check=True)
         second=json.loads(Path('/etc/remnawave-yggdrasil/state.json').read_text())
         assert first['host_uuid']==second['host_uuid']
+        assert first['address']==second['address']
         assert snapshot['profile']==api.request('GET','/config-profiles/'+profile['uuid'])['config']
         assert snapshot['source']==api.request('GET','/hosts/'+source['uuid'])
         assert snapshot['containers']==run('docker','inspect','--format','{{.Id}} {{.State.StartedAt}}','remnanode','test-remnawave')
