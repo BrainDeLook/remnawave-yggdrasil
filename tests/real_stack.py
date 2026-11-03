@@ -19,13 +19,14 @@ ROOT=Path(__file__).resolve().parents[1]
 
 def wait(action,seconds=180):
     deadline=time.monotonic()+seconds
+    last='not ready'
     while time.monotonic()<deadline:
         try:
             value=action()
             if value: return value
-        except (Error,OSError): pass
+        except (Error,OSError) as exc: last=str(exc)
         time.sleep(2)
-    raise RuntimeError('CI stack did not become ready')
+    raise RuntimeError('CI stack did not become ready: '+last)
 
 
 def main():
@@ -47,6 +48,7 @@ def main():
         *[a for key in env for a in ('-e',key)],'remnawave/backend:3',timeout=300)
     api=API('http://127.0.0.1:3000','ci-bootstrap')
     wait(lambda: api.request('GET','/auth/status'))
+    print('CI: real backend API ready',flush=True)
     admin=api.request('POST','/auth/register',{'username':'ciadmin','password':'Aa1'+secrets.token_hex(20)})
     api.token=admin['accessToken']
     generated=api.request('POST','/tokens',{'name':'Native Ygg CI','expiresInDays':1,'scopes':['*']})
@@ -67,6 +69,7 @@ def main():
     node=api.request('POST','/nodes',{'name':'Native Ygg CI','address':'127.0.0.1','port':2222,
          'configProfile':{'activeConfigProfileUuid':profile['uuid'],'activeInbounds':[inbound]}})
     wait(lambda: next((n for n in api.nodes() if n.uuid==node['uuid']),None))
+    print('CI: real Remnanode connected',flush=True)
     squad=api.request('POST','/internal-squads',{'name':'Native Ygg CI','inbounds':[inbound]})
     user=api.request('POST','/users',{'username':'ygg-ci-user','expireAt':(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=1)).isoformat(),
             'activeInternalSquads':[squad['uuid']]})
@@ -93,7 +96,7 @@ def main():
         run('sysctl','-w','net.ipv6.conf.all.disable_ipv6=1')
         args=[sys.executable,str(ROOT/'main.py'),'--yes','--no-ssh','--panel','http://127.0.0.1:3000',
               '--node',node['uuid'],'--source-host',source['uuid'],'--name','NL Ygg CI',
-              '--allow-ip','200:db8::111','--allow-ip','300:db8:1:1::/64',
+              '--allow-ip','200:db8::111','--allow-ip','200:db8::333','--allow-ip','300:db8:1:1::/64',
               '--user-uuid',user['uuid'],'--peer',f'tcp://127.0.0.1:{peer_port}']
         subprocess.run(args,check=True)
         first=json.loads(Path('/etc/remnawave-yggdrasil/state.json').read_text())
@@ -124,11 +127,11 @@ def main():
         ns=['ip','netns','exec','remna-ygg-ci']
         run(*ns,'sysctl','-w','net.ipv6.conf.all.disable_ipv6=0')
         run(*ns,'ip','link','set','lo','up'); run(*ns,'ip','link','set','ry-client','up')
-        for ip in ('fd42:4567::2/64','200:db8::111/128','200:db8::222/128','300:db8:1:1::111/128','300:db8:1:2::111/128'):
+        for ip in ('fd42:4567::2/64','200:db8::111/128','200:db8::222/128','200:db8::333/128','200:db8::444/128','300:db8:1:1::111/128','300:db8:1:2::111/128'):
             run(*ns,'ip','-6','addr','add',ip,'dev','ry-client','nodad')
         run(*ns,'ip','-6','route','add',address+'/128','via','fd42:4567::1','dev','ry-client')
         code='''import socket,sys
-for source,allowed in [('200:db8::111',True),('200:db8::222',False),('300:db8:1:1::111',True),('300:db8:1:2::111',False)]:
+for source,allowed in [('200:db8::111',True),('200:db8::222',False),('200:db8::333',True),('200:db8::444',False),('300:db8:1:1::111',True),('300:db8:1:2::111',False)]:
  for port in [443,22]:
   with socket.socket(socket.AF_INET6,socket.SOCK_STREAM) as s:
    s.settimeout(3);s.bind((source,0))
@@ -138,6 +141,37 @@ for source,allowed in [('200:db8::111',True),('200:db8::222',False),('300:db8:1:
 print('PASS remote namespace: router/LAN allowed, other clients blocked, SSH off')
 '''
         print(run(*ns,sys.executable,'-c',code,address))
+        # Same node/Host, independently grant owner SSH and leave friend VPN-only.
+        ssh_args=[a if a!='--no-ssh' else '--ssh' for a in args]+['--ssh-port','2223','--ssh-allow-ip','200:db8::111','--ssh-allow-ip','200:db8::444']
+        subprocess.run(ssh_args,check=True)
+        code2="""import socket,sys
+for source,expected in [('200:db8::111',True),('200:db8::333',False),('200:db8::444',True)]:
+ with socket.socket(socket.AF_INET6,socket.SOCK_STREAM) as s:
+  s.settimeout(3);s.bind((source,0))
+  try:
+   s.connect((sys.argv[1],2223));connected=s.recv(256).startswith(b'SSH-')
+  except (TimeoutError,ConnectionRefusedError):connected=False
+  assert connected==expected,(source,connected)
+print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can')
+"""
+        print(run(*ns,sys.executable,'-c',code2,address))
+        keyfile=ROOT/'.test-bin/ssh-key'
+        run('ssh-keygen','-q','-t','ed25519','-N','','-f',str(keyfile))
+        Path('/root/.ssh').mkdir(mode=0o700,exist_ok=True)
+        with open('/root/.ssh/authorized_keys','a') as authorized:
+            authorized.write(keyfile.with_suffix('.pub').read_text())
+        Path('/root/.ssh/authorized_keys').chmod(0o600)
+        output=run(*ns,'ssh','-6','-b','200:db8::111','-p','2223','-i',str(keyfile),'-o','BatchMode=yes',
+                   '-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=/dev/null',
+                   '-o','ConnectTimeout=5','root@'+address,'printf REMNA_YGG_SSH_OK')
+        assert 'REMNA_YGG_SSH_OK' in output
+        subprocess.run(args,check=True)
+        assert run('systemctl','is-active','remna-ygg-ssh',check=False).strip()!='active'
+        assert json.loads(Path('/etc/remnawave-yggdrasil/state.json').read_text())['host_uuid']==first['host_uuid']
+        assert snapshot['containers']==run('docker','inspect','--format','{{.Id}} {{.State.StartedAt}}','remnanode','test-remnawave')
+        assert snapshot['profile']==api.request('GET','/config-profiles/'+profile['uuid'])['config']
+        verify(public_client)
+        print('PASS SSH key login and disable; original public VLESS and containers preserved')
         run('ip','link','del','ry-host'); run('ip','netns','del','remna-ygg-ci')
     finally:
         peer.terminate();peer.wait(timeout=10);peer_log.close()

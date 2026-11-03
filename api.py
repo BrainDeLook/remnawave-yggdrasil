@@ -96,6 +96,7 @@ class API:
         if not token or any(c in token for c in '\r\n'):
             raise Error('Пустой или некорректный API-токен')
         self.url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, '/api', '', ''))
+        self.local = parsed.hostname in ("localhost", "127.0.0.1", "::1")
         self.token = token
         self.opener = urllib.request.build_opener(NoRedirect)
 
@@ -103,6 +104,7 @@ class API:
         payload = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.url + path, payload, method=method,
               headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': 'application/json',
+                       **({'X-Forwarded-For': '127.0.0.1'} if self.local else {}),
                        'X-Forwarded-Proto': 'https', 'User-Agent': 'remnawave-yggdrasil/0.1.0'})
         try:
             with self.opener.open(req, timeout=30) as response:
