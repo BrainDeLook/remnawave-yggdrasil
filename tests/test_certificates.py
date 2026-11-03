@@ -10,8 +10,7 @@ class CertificateDiscoveryTests(unittest.TestCase):
     def check(self,args,**kwargs):
         folder=Path(args[args.index('-in')+1]).parent.name
         if folder=='wrong-domain': return subprocess.CompletedProcess(args,0,'Hostname node.example.com does NOT match certificate\nnotAfter=Nov 30 00:00:00 2030 GMT','')
-        if folder=='expired': return subprocess.CompletedProcess(args,1,'Certificate will expire','')
-        year='2031' if folder.endswith('-0001') else '2030'
+        year='2000' if folder=='expired' else '2031' if folder.endswith('-0001') else '2030'
         return subprocess.CompletedProcess(args,0,f'Hostname node.example.com does match certificate\nnotAfter=Nov 30 00:00:00 {year} GMT','')
     def test_wildcard_parent_domain_and_renewal_suffix(self):
         with tempfile.TemporaryDirectory() as directory:

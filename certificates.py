@@ -6,6 +6,7 @@ import shutil
 import ssl
 import subprocess
 import tempfile
+import time
 from api import Error
 from node import APP, BASE, run, write
 
@@ -17,11 +18,12 @@ def discover(domain: str, root: Path = Path('/etc/letsencrypt/live')) -> tuple[P
         key=cert.parent/'privkey.pem'
         if not cert.is_file() or not key.is_file(): continue
         checked=subprocess.run(['openssl','x509','-in',str(cert),'-noout','-checkhost',domain,
-                                '-checkend','0','-enddate'],capture_output=True,text=True,timeout=10)
+                                '-enddate'],capture_output=True,text=True,timeout=10)
         if checked.returncode or 'does match certificate' not in checked.stdout: continue
         expiry=next((line.removeprefix('notAfter=') for line in checked.stdout.splitlines() if line.startswith('notAfter=')),None)
         if expiry:
-            matches.append((ssl.cert_time_to_seconds(expiry),str(cert),cert,key))
+            deadline=ssl.cert_time_to_seconds(expiry)
+            if deadline>time.time(): matches.append((deadline,str(cert),cert,key))
     if not matches: return None
     # Prefer the longest-lived valid certificate, retaining the stable live symlink
     # so the existing renewal mechanism continues to work.
