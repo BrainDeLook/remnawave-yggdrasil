@@ -1,0 +1,31 @@
+name: Verify native Remnawave integration
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          python3 -m compileall -q api.py main.py node.py probe.py
+          bash -n install.sh tests/smoke.sh
+          python3 main.py --help
+          python3 build.py
+          python3 -m unittest discover -s tests -v
+  real-panel-node:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Real Remnawave panel, node, Yggdrasil, API and HTTPS
+        run: sudo -E bash tests/smoke.sh
+      - name: Logs on failure (no environment/token dumps)
+        if: failure()
+        run: |
+          sudo journalctl -u yggdrasil -u remna-ygg-network -u remna-ygg-access -u remna-ygg-ssh -n 80 --no-pager
+          sudo docker logs --tail 70 test-remnawave 2>&1 || true
+          sudo docker logs --tail 70 remnanode 2>&1 || true
