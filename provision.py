@@ -65,8 +65,8 @@ def apply(api: API, node: Node, before: dict, config: dict, mapping: dict[str,st
                  'nodes':[node.uuid],'tags':[marker],'isDisabled':not selected,'isHidden':False,
                  'overrideSniFromAddress':False,'keepSniBlank':False,
                  'internalSquads':{'mode':'ALLOW_ONLY' if selected else 'EXCLUDE','squads':selected}}
-        if protocol=='grpc': payload['path']=stream['grpcSettings']['serviceName']
-        if protocol=='xhttp': payload['path']=stream['xhttpSettings']['path']
+        if protocol=='grpc': payload['path']=stream.get('grpcSettings',{}).get('serviceName','')
+        if protocol=='xhttp': payload['path']=stream.get('xhttpSettings',{}).get('path','/')
         if protocol=='hy2': payload['alpn']='h3'
         host=Host.parse(api.request('POST','/hosts',payload))
         all_hosts.append(host)

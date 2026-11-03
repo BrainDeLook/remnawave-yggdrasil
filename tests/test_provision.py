@@ -32,6 +32,14 @@ class Panel:
 
 
 class ProvisionTests(unittest.TestCase):
+    def test_existing_transport_uses_normal_defaults_when_settings_omitted(self):
+        for protocol,expected in [('grpc',''),('xhttp','/')]:
+            config,mapping=convert(Profile.parse({'inbounds':[BASE]}),'node-tcp',[protocol])
+            config['inbounds'][1]['streamSettings'].pop(protocol+'Settings')
+            panel=Panel(config,[])
+            with tempfile.TemporaryDirectory() as directory:
+                apply(panel,Node.parse(NODE),config,config,mapping,Host.parse(SOURCE),'200:db8::1','Node',{protocol:[]},Path(directory))
+            self.assertEqual(panel.created[0]['path'],expected)
     def test_unassigned_host_disabled_and_not_granted_to_everyone(self):
         config,mapping=convert(Profile.parse({'inbounds':[BASE]}),'node-tcp',['ygg'])
         panel=Panel(config,[])

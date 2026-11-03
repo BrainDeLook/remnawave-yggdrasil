@@ -269,6 +269,22 @@ print('PASS dedicated Ygg port: owner can connect only to Ygg address, other int
         assert len([h for h in api.hosts() if any(t.startswith('REMNA_MULTI_') for t in h.raw['tags'])])==4
         assert Path('/dev/shm/hysteria_key.pem').stat().st_mode & 0o077 == 0
         print('PASS all protocol listeners, panel profile/squad/Host control, preserved public VLESS, idempotence and protected certificate key')
+        # Multi-mode regression: previously saved nonempty SSH ACL survived --no-ssh.
+        multi_ssh_args=[a if a!='--no-ssh' else '--ssh' for a in multi_args]+[
+            '--ssh-port','2223','--ssh-allow-ip','200:db8::111','--ssh-allow-ip','200:db8::444']
+        subprocess.run(multi_ssh_args,check=True)
+        print(run(*ns,sys.executable,'-c',code2,address))
+        subprocess.run(multi_args,check=True)
+        disabled_state=json.loads(Path('/etc/remnawave-yggdrasil/multi-state.json').read_text())
+        assert disabled_state['ssh'] is False and disabled_state['ssh_allowed']==[]
+        assert run('systemctl','is-active','remna-ygg-ssh',check=False).strip()!='active'
+        # Adding only one protocol must retain the complete installed Host inventory.
+        partial_args=multi_args[:]
+        for protocol in ('hy2','grpc','xhttp'):
+            index=partial_args.index(protocol); del partial_args[index-1:index+1]
+        subprocess.run(partial_args,check=True)
+        assert len(json.loads(Path('/etc/remnawave-yggdrasil/multi-state.json').read_text())['hosts'])==4
+        print('PASS multi-mode SSH disable and complete Host inventory after partial rerun',flush=True)
         run('ip','link','del','ry-host'); run('ip','netns','del','remna-ygg-ci')
     finally:
         peer.terminate();peer.wait(timeout=10);peer_log.close()

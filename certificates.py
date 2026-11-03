@@ -1,14 +1,42 @@
 """Selected Hysteria2 certificate copy, boot/renewal sync; no world-readable key."""
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
-import shutil
+import re
 import ssl
 import subprocess
 import tempfile
 import time
 from api import Error
 from node import APP, BASE, run, write
+
+
+@dataclass(frozen=True)
+class CertificatePair:
+    cert: Path
+    key: Path
+    domain: str | None
+
+
+def validate(cert: Path, key: Path, domain: str | None = None) -> CertificatePair:
+    # absolute() preserves Certbot's live symlink; resolve() would pin an archive version.
+    cert=cert.expanduser().absolute(); key=key.expanduser().absolute()
+    if not cert.is_file() or not key.is_file(): raise Error('Не найдены файл сертификата или его приватный ключ')
+    details=run('openssl','x509','-in',str(cert),'-noout','-pubkey','-startdate','-enddate',
+                *(['-checkhost',domain] if domain else []))
+    if domain and 'does match certificate' not in details:
+        raise Error('Сертификат Hysteria2 не подходит для домена '+domain)
+    dates=dict(line.split('=',1) for line in details.splitlines() if line.startswith(('notBefore=','notAfter=')))
+    if 'notBefore' not in dates or 'notAfter' not in dates: raise Error('OpenSSL не вернул срок действия сертификата')
+    now=time.time()
+    if ssl.cert_time_to_seconds(dates['notBefore'])>now: raise Error('Срок действия сертификата Hysteria2 ещё не начался')
+    if ssl.cert_time_to_seconds(dates['notAfter'])<=now: raise Error('Сертификат Hysteria2 просрочен — обновите его перед установкой')
+    public=re.search(r'-----BEGIN PUBLIC KEY-----.*?-----END PUBLIC KEY-----',details,re.S)
+    if not public: raise Error('Не удалось прочитать публичный ключ сертификата')
+    key_public=run('openssl','pkey','-in',str(key),'-pubout')
+    if public[0].strip()!=key_public.strip(): raise Error('Сертификат Hysteria2 и приватный ключ не образуют пару')
+    return CertificatePair(cert,key,domain)
 
 
 def discover(domain: str, root: Path = Path('/etc/letsencrypt/live')) -> tuple[Path,Path] | None:
@@ -33,6 +61,8 @@ def discover(domain: str, root: Path = Path('/etc/letsencrypt/live')) -> tuple[P
 
 def sync():
     config=json.loads((BASE/'cert-sync.json').read_text())
+    # Renewal replaces source files independently of the installer; validate this read.
+    validate(Path(config['cert']),Path(config['key']),config.get('domain'))
     changed=False
     for key,destination,mode in (('cert','/dev/shm/hysteria_cert.pem',0o644),('key','/dev/shm/hysteria_key.pem',0o600)):
         source=Path(config[key]); target=Path(destination)
@@ -51,13 +81,8 @@ def sync():
     if changed: run('docker','restart','remnanode',timeout=120)
 
 
-def setup(cert: Path, key: Path):
-    if not cert.is_file() or not key.is_file(): raise Error('Не найдены файлы сертификата Hysteria2')
-    run('openssl','x509','-in',str(cert),'-noout','-checkend','0')
-    cert_public=run('openssl','x509','-in',str(cert),'-pubkey','-noout')
-    key_public=run('openssl','pkey','-in',str(key),'-pubout')
-    if cert_public.strip()!=key_public.strip(): raise Error('Ключ и сертификат Hysteria2 не совпадают')
-    write(BASE/'cert-sync.json',json.dumps({'cert':str(cert),'key':str(key)}))
+def setup(pair: CertificatePair):
+    write(BASE/'cert-sync.json',json.dumps({'cert':str(pair.cert),'key':str(pair.key),'domain':pair.domain}))
     write(Path('/etc/systemd/system/remna-hy2-certs.service'),f'''[Unit]
 Description=Remnanode Hysteria2 certificate sync
 After=docker.service

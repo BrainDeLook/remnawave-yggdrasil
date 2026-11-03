@@ -4,10 +4,36 @@ import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
-from certificates import discover
+from certificates import discover, validate
+from api import Error
 
 
 class CertificateDiscoveryTests(unittest.TestCase):
+    def test_validation_rejects_expired_certificate_and_wrong_key_before_setup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cert=Path(directory)/'fullchain.pem'; key=Path(directory)/'privkey.pem'
+            cert.touch(); key.touch()
+            public='-----BEGIN PUBLIC KEY-----\nfixture\n-----END PUBLIC KEY-----'
+            details=public+'\nnotBefore=Nov 30 00:00:00 2000 GMT\nnotAfter=Nov 30 00:00:00 2001 GMT\nHostname node.example.com does match certificate'
+            with patch('certificates.run',return_value=details):
+                with self.assertRaisesRegex(Error,'просрочен'): validate(cert,key,'node.example.com')
+            details=details.replace('2001 GMT','2031 GMT')
+            with patch('certificates.run',side_effect=[details,'another public key']):
+                with self.assertRaisesRegex(Error,'не образуют пару'): validate(cert,key,'node.example.com')
+
+    @unittest.skipUnless(shutil.which('openssl'),'OpenSSL is exercised in Linux CI')
+    def test_relative_live_path_becomes_absolute_without_freezing_archive(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root=Path(directory); archive=root/'archive'; archive.mkdir()
+            cert=archive/'fullchain1.pem'; key=archive/'privkey1.pem'
+            subprocess.run(['openssl','req','-x509','-newkey','ec','-pkeyopt','ec_paramgen_curve:prime256v1',
+                            '-nodes','-days','1','-subj','/CN=node.example.com',
+                            '-keyout',str(key),'-out',str(cert)],check=True,capture_output=True)
+            live=root/'live'; live.mkdir()
+            (live/'fullchain.pem').symlink_to(cert); (live/'privkey.pem').symlink_to(key)
+            pair=validate((live/'fullchain.pem').relative_to(Path.cwd()),(live/'privkey.pem').relative_to(Path.cwd()),'node.example.com')
+            self.assertTrue(pair.cert.is_absolute()); self.assertEqual(pair.cert,live/'fullchain.pem')
+            self.assertEqual(pair.key,live/'privkey.pem')
     @unittest.skipUnless(shutil.which('openssl'),'OpenSSL is exercised in Linux CI')
     def test_real_openssl_wildcard_in_differently_named_lineage(self):
         with tempfile.TemporaryDirectory() as directory:

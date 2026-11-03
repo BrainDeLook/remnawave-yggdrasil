@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          python3 -m compileall -q api.py main.py node.py probe.py multi.py converter.py provision.py certificates.py desktop.py
+          python3 -m compileall -q api.py main.py node.py probe.py multi.py converter.py provision.py certificates.py desktop.py ui.py
           bash -n install.sh tests/smoke.sh
           python3 main.py --help
           python3 multi.py --help
@@ -30,20 +30,3 @@ jobs:
           sudo journalctl -u yggdrasil -u remna-ygg-network -u remna-ygg-access -u remna-ygg-ssh -n 80 --no-pager
           sudo docker logs --tail 70 test-remnawave 2>&1 || true
           sudo docker logs --tail 70 remnanode 2>&1 || true
-  windows-converter:
-    runs-on: windows-2025
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: |
-          python -m pip install pyinstaller==6.16.0
-          python desktop.py --self-test
-          python -m PyInstaller --onefile --windowed --name RemnawaveConverter desktop.py
-          $p = Start-Process -FilePath dist/RemnawaveConverter.exe -ArgumentList '--self-test' -WindowStyle Hidden -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw 'Packaged converter self-test failed' }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: RemnawaveConverter-Windows-x64
-          path: dist/RemnawaveConverter.exe

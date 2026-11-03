@@ -7,10 +7,10 @@ import re
 import tarfile
 root=Path(__file__).resolve().parent
 parser=argparse.ArgumentParser(); parser.add_argument('--update',action='store_true'); args=parser.parse_args()
-version='v0.2.1'
+version='v0.2.2'
 buffer=io.BytesIO()
 with tarfile.open(fileobj=buffer,mode='w',format=tarfile.USTAR_FORMAT) as bundle:
-    for name in ('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py'):
+    for name in ('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py','ui.py'):
         data=(root/name).read_bytes(); entry=tarfile.TarInfo(name)
         entry.size=len(data); entry.mode=0o700; entry.mtime=0
         bundle.addfile(entry,io.BytesIO(data))

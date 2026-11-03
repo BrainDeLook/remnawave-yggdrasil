@@ -3,7 +3,6 @@
 from __future__ import annotations
 import argparse
 import datetime
-import getpass
 import json
 import os
 from pathlib import Path
@@ -15,26 +14,37 @@ import termios
 import time
 from api import API, AccessRequired, Error, obj
 from converter import Profile, convert, LABELS
-from main import say, prompt, choose, access
+from ui import say, prompt, choose, access, section, field, option, panel as frame, secret as secret_prompt, confirm
 import node as local
 import certificates
 import provision
 
-VERSION='0.2.1'
-FILES=('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py')
+VERSION='0.2.2'
+FILES=('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py','ui.py')
 
 
 def result():
     state=json.loads((local.BASE/'multi-state.json').read_text())
-    say('\n  ╔═ ГОТОВО · '+state['name']+' ═╗','1;32')
-    say('  Профиль Remnawave: '+state['profile'])
+    frame('УСТАНОВКА ЗАВЕРШЕНА',[(state['name'],'success'),('Ниже — сохранённые настройки этой ноды.','text')],'success')
+    field('Профиль в панели',state['profile'])
     for host in state['hosts']:
-        say(f"  {LABELS[host['protocol']]}\n    inbound: {host['tag']}\n    Host: {host['name']} · {host['address']}:{host['port']}")
-    if state.get('address'): say('  IPv6 Yggdrasil ноды: '+state['address'])
-    if state.get('ssh'): say('  SSH: ssh -6 -p '+str(state['ssh_port'])+' root@'+state['address'])
-    say('  Откройте Remnawave → Внутренние сквады: новые inbound можно включать отдельно.\n  Host → ограничения внутренних сквадов управляют показом каждого Host в подписке.\n  Если сквады выбраны, на новом Host разрешён показ только им.\n  Если сквады не выбраны, новый Host ВЫКЛЮЧЕН. В панели выберите ему\n  разрешённые сквады, разрешите inbound и включите Host.\n  Обновите обычную личную подписку в клиенте. Общий UUID не создаётся.','32')
-    say('  Тахион: подписка не передаёт bind_interface. На некоторых версиях требуется\n  привязка к интерфейсу Yggdrasil на роутере. Это ограничение клиента, не панели.','33')
-    say('  Проверены API-настройки и локальные слушатели. Проверка реального VPN\n  выполняется вашим клиентом после обновления подписки.')
+        endpoint=('['+host['address']+']') if ':' in host['address'] else host['address']
+        frame(LABELS[host['protocol']],[(host['name'],'value'),
+              ('Адрес: '+endpoint+':'+str(host['port']),'example'),
+              ('Inbound: '+host['tag'],'muted'),
+              ('Host выключен — настройте доступ в панели и включите его.' if host.get('disabled') else 'Host включён; выдача зависит от разрешений сквадов.',
+               'warning' if host.get('disabled') else 'text')])
+    if state.get('address'): field('IPv6 Yggdrasil этой VPS',state['address'])
+    if state.get('ssh'):
+        say('\n  Команда подключения по SSH:','section')
+        say('  ssh -6 -p '+str(state['ssh_port'])+' root@'+state['address'],'example')
+    elif state.get('address'): say('  SSH через Yggdrasil выключен.','muted')
+    say('\n  Что делать дальше','section')
+    say('  1. В Remnawave откройте «Внутренние сквады» и проверьте доступ к inbound.\n  2. В «Хостах» проверьте ограничения сквадов и включите нужные Host.\n  3. Обновите свою подписку в VPN-клиенте и выберите новый сервер.\n  Управление подключениями дальше выполняется в обычной панели Remnawave.')
+    if state.get('address'):
+        say('\n  Тахион / OpenWrt','warning')
+        say('  В некоторых версиях Тахиона требуется bind_interface: "yggdrasil".\n  Эту привязку задают на роутере: обычная VLESS-подписка её не передаёт.','warning')
+    say('\n  Проверены настройки API и TCP-слушатели. Открытие сайтов проверьте\n  в своём клиенте после обновления подписки. Вывод выше — сохранённый\n  результат установки; изменения в панели после запуска здесь не отражаются.','muted')
 
 
 def main():
@@ -61,22 +71,30 @@ def main():
     if args.result: result(); return
     local.preflight()
     if sys.stdin.isatty(): termios.tcflush(sys.stdin.fileno(),termios.TCIFLUSH)
-    say('\n  ╔══════════════════════════════════════════════════════╗\n  ║       Remnawave · дополнительные протоколы '+VERSION+'      ║\n  ╚══════════════════════════════════════════════════════╝','1;36')
-    say('  Запускайте на VPS уже работающей ноды.\n  Базовый VLESS остаётся. Выберите дополнения: мы подготовим зависимости,\n  добавим inbound в профиль, Host и выбранные сквады через API.\n  Не нужен VPN Username и не нужно вручную вставлять JSON в панель.')
+    frame('Remnawave · дополнительные протоколы · '+VERSION,[
+        ('Мастер для VPS с уже работающей нодой Remnawave.','text'),
+        ('Вы выбираете протоколы и группы пользователей. Скрипт готовит VPS,','text'),
+        ('добавляет inbound и Host через API, затем выдаёт результат.','text'),
+        ('До подтверждения плана рабочие настройки не применяются.','muted')])
+    say('  Цвета: разделы — бирюзовые; вопросы — жёлтые; выбранное — зелёное.','muted')
+    say('  Примеры и команды — синие; замечания — янтарные; ошибки — красные.','muted')
     old=json.loads((local.BASE/'multi-state.json').read_text()) if (local.BASE/'multi-state.json').exists() else {}
-    args.ssh_port=args.ssh_port or old.get('ssh_port',22)
+    if args.ssh_port is None: args.ssh_port=old.get('ssh_port',22)
     panel=args.panel or old.get('panel')
+    section(1,'Доступ к панели')
     if not panel and not args.yes:
-        say('\n  Шаг 1 · Доступ к панели\n  URL — адрес страницы входа в Remnawave: https://panel.example.com.\n  Здесь НЕ адрес VPS ноды, не ссылка подписки и не секретная ссылка eGames.')
-        panel=prompt('URL панели')
+        say('  Укажите адрес панели Remnawave, в которой настроена эта нода.\n  Нужен корневой адрес сайта, без /dashboard и без ссылки подписки.')
+        say('  Пример: https://panel.example.com','example')
+        panel=prompt('Адрес панели Remnawave')
     if not panel: raise Error('Укажите --panel')
     token=os.environ.pop('REMNAWAVE_API_TOKEN','')
     if args.token_file:
         if args.token_file.stat().st_mode & 0o077: raise Error('Закройте файл токена: chmod 600')
         token=args.token_file.read_text().strip()
     if not token and not args.yes:
-        say('  Токен: Настройки Remnawave → Токены API → отдельный временный токен.\n  Нужны чтение и изменение Profiles, Nodes, Hosts, Internal Squads.\n  Для первого запуска можно полный доступ. Токен не сохраняется.')
-        token=getpass.getpass('  API-токен (ввод скрыт): ').strip()
+        say('  Где взять токен: «Настройки Remnawave» → «Токены API».\n  Создайте отдельный временный токен с чтением и изменением профилей,\n  нод, Host и внутренних сквадов. Подойдёт временный полный доступ.')
+        say('  Токен используется только в этом запуске и не сохраняется.','muted')
+        token=secret_prompt('Вставьте API-токен панели')
     api=API(panel,token)
     secret=os.environ.pop('REMNAWAVE_PANEL_ACCESS','')
     if args.access_file:
@@ -86,10 +104,14 @@ def main():
     try: nodes=api.nodes()
     except AccessRequired:
         if args.yes or secret: raise
-        say('  Панель вернула HTML. Для cookie-защиты eGames нужна полная секретная\n  ссылка из результата установки/меню eGames:\n  https://panel.example.com/auth/login?СЕКРЕТНОЕ_ИМЯ=СЕКРЕТНОЕ_ЗНАЧЕНИЕ\n  После входа браузер убирает секрет из адресной строки. Возьмите исходную\n  ссылку eGames. Не отправляйте её в чат. Можно Cookie name=value.','33')
-        api.set_access(getpass.getpass('  Секретная ссылка или Cookie (скрыто): '))
+        say('  Перед API обнаружена страница входа или HTML-заглушка.','warning')
+        say('  При cookie-защите eGames нужна исходная секретная ссылка из\n  результата установки или меню eGames. После входа браузер обычно\n  убирает секрет из адресной строки. Обычный адрес панели не подходит.')
+        say('  Пример: https://panel.example.com/auth/login?ИМЯ=ЗНАЧЕНИЕ','example')
+        say('  Можно ввести Cookie в формате name=value. Ссылка не сохраняется.','muted')
+        api.set_access(secret_prompt('Вставьте полную секретную ссылку eGames или Cookie'))
         nodes=api.nodes()
-    say('\n  Шаг 2 · Выбор ноды\n  Выберите именно ЭТУ VPS, на которой сейчас запущен мастер.\n  Нода должна быть подключена к панели; обычное VPN-подключение уже работает.')
+    section(2,'Нода и исходное подключение')
+    say('  Выберите в панели именно ту VPS, на которой запущен мастер.\n  Нода должна быть подключена к панели, а её обычный VLESS — работать.')
     selected=choose(nodes,args.node,old.get('node_uuid'),args.yes,'Нода ЭТОГО VPS')
     hosts=api.hosts()
     available=[h for h in hosts if h.profile==selected.profile and h.inbound in {i.uuid for i in selected.inbounds}
@@ -100,15 +122,23 @@ def main():
     base_ids={i.uuid for i in selected.inbounds if i.tag in typed.bases}
     source=choose([h for h in available if h.inbound in base_ids],args.source_host,old.get('source_host_uuid'),args.yes,'Исходный рабочий VLESS TCP Reality Host')
     base=next(i.tag for i in selected.inbounds if i.uuid==source.inbound)
-    say(f'  Нода: {selected.name}; адрес API: {selected.address}; профиль: {profile["name"]}\n  Исходный Host: {source.name}; inbound: {base}')
-    say('\n  Шаг 3 · Дополнительные протоколы\n  Базовый TCP Reality уже работает и сохраняется.\n  1 · Hysteria2: UDP, нужен действующий сертификат домена\n  2 · VLESS gRPC Reality: TCP 8443\n  3 · VLESS XHTTP Reality: TCP 4443\n  4 · VLESS Reality через Yggdrasil: отдельный TCP 1488, доступ через Yggdrasil\n  Введите номера через пробел, например 1 4. Каждый вариант необязателен.')
+    field('Адрес API выбранной ноды',selected.address)
+    field('Профиль',profile['name'])
+    field('Исходный inbound',base)
+    section(3,'Какие подключения добавить')
+    say('  Обычный TCP Reality сохраняется. Дополнения можно выбирать независимо.\n  Если такой протокол уже есть в профиле, мастер использует его настройки.')
+    option(1,'Hysteria2','UDP 443; требуется TLS-сертификат домена')
+    option(2,'VLESS gRPC Reality','TCP 8443')
+    option(3,'VLESS XHTTP Reality','TCP 4443')
+    option(4,'VLESS Reality через Yggdrasil','TCP 1488; сеть Yggdrasil')
+    say('  Пример ввода: 4 — только Yggdrasil; 1 4 — Hysteria2 и Yggdrasil.','example')
     protocols=args.protocol
     if not protocols and not args.yes:
         keys=list(LABELS)
         while not protocols:
             answer=prompt('Нужные дополнения','4').split()
             if answer and all(n in ('1','2','3','4') for n in answer): protocols=list(dict.fromkeys(keys[int(n)-1] for n in answer))
-            else: say('  Нужны номера 1–4 через пробел. Например: 4','31')
+            else: say('  Введите номера от 1 до 4 через пробел. Например: 1 4','error')
     config,mapping=convert(typed,base,protocols,{'ygg':args.ygg_port})
     raw_by_tag={i['tag']:i for i in config['inbounds']}
     name=args.name or old.get('name') or selected.name
@@ -118,35 +148,48 @@ def main():
     known={s['uuid'] for s in all_squads}
     if any(v not in known for v in args.squad): raise Error('Не найден указанный UUID сквада')
     grants={p:list(args.squad) for p in protocols}
-    say('\n  Шаг 4 · Кому доступны новые подключения\n  Внутренний сквад — группа VPN-пользователей в Remnawave.\n  Мастер добавит inbound в выбранные сквады, сохранив прежние разрешения.\n  На НОВЫХ Host дополнительно разрешит показ только этим сквадам.\n  Ничего не выбрали — новый Host создаётся ВЫКЛЮЧЕННЫМ. Потом в панели\n  назначьте сквады для inbound/Host и включите Host.\n  На уже созданных Host ручные ограничения панели сохраняются.')
+    section(4,'Кому выдать доступ')
+    say('  Внутренний сквад — группа VPN-пользователей в Remnawave.\n  Для каждого дополнения выберите группы, которым оно нужно.\n  Мастер добавит им доступ к inbound и ограничит ими показ нового Host.')
+    say('  Enter без выбора → новый Host будет создан выключенным.\n  Позже назначьте ему группы в панели и включите Host.','warning')
+    say('  У уже существующих Host сохраняются ограничения, заданные в панели.\n  Выбор ниже добавляет доступ к inbound, но не меняет ограничения такого Host.','muted')
     for p in protocols:
         if args.yes or args.squad: continue
-        say('  '+LABELS[p])
-        for index,squad in enumerate(all_squads,1): say(f'    {index}. {squad["name"]}')
+        say('\n  '+LABELS[p],'section')
+        for index,squad in enumerate(all_squads,1): option(index,squad['name'])
         while True:
             answer=prompt('Номера сквадов через пробел; Enter — настрою в панели').split()
             if not answer: break
             if all(v.isdigit() and 1<=int(v)<=len(all_squads) for v in answer):
                 grants[p]=list(dict.fromkeys(all_squads[int(v)-1]['uuid'] for v in answer)); break
-            say('  Выберите номера из списка или нажмите Enter.','31')
+            say('  Введите номера из списка через пробел или нажмите Enter.','error')
     # Omitting Yggdrasil means leave it alone, including the saved SSH/access state.
     allowed=old.get('allowed',[]); ssh_allowed=old.get('ssh_allowed',[]); ssh_enabled=old.get('ssh',False)
     if 'ygg' in protocols:
-        say('\n  Шаг 5 · Yggdrasil: сеть и SSH\n  Сквад разрешает VPN-учётку, а эти адреса — устройства, которым VPS\n  разрешает подключаться по сети. Для доступа нужны оба разрешения.\n  На OpenWrt: Сеть → Интерфейсы → Yggdrasil.\n  IPv6 200:…/7 → копируйте БЕЗ /7 (сам роутер и Тахион).\n  IPv6-PD 300:…/64 → копируйте С /64 (вся LAN, включая меняющиеся IP ПК).\n  Отдельный IP ПК из этой LAN не требуется. Адрес VPS сюда НЕ вводите.\n  Можно несколько адресов роутеров и несколько подсетей друзей через пробел.')
+        section(5,'Устройства Yggdrasil и доступ по SSH')
+        say('  Сквад определяет доступ VPN-пользователя. Сейчас укажите устройства,\n  которым разрешено соединяться с VPS по сети Yggdrasil.\n  Где взять значения: OpenWrt → Сеть → Интерфейсы → Yggdrasil.')
+        frame('Два разных поля на роутере',[
+            ('IPv6: адрес самого роутера. Уберите окончание /7.','text'),
+            ('200:1111:2222:3333:4444:5555:6666:7777','example'),
+            ('IPv6-PD: подсеть всей LAN. Оставьте окончание /64.','text'),
+            ('300:1111:2222:3333::/64','example'),
+            ('Это примеры. Вставляйте свои значения из интерфейса роутера.','warning')])
+        say('  Подсеть LAN уже охватывает ПК, даже если его IPv6 меняется.\n  Отдельный IP ПК из этой LAN не нужен. Для друзей можно добавить\n  несколько адресов роутеров и несколько LAN-подсетей через пробел.')
+        say('  В эти списки не нужно добавлять адрес самой VPS.','warning')
         ssh_enabled=args.ssh or (old.get('ssh',False) and not args.no_ssh)
         if not args.yes and not args.ssh and not args.no_ssh:
-            answer=prompt('Открыть также SSH через Yggdrasil? да/нет','да' if ssh_enabled else 'нет').lower()
-            while answer not in ('да','нет','yes','no'): answer=prompt('Введите да или нет').lower()
-            ssh_enabled=answer in ('да','yes')
+            say('\n  SSH позволяет управлять VPS через Yggdrasil. Для VPN он не обязателен.')
+            ssh_enabled=confirm('Разрешить также SSH через Yggdrasil?',ssh_enabled)
         previous=old.get('allowed',[])
         if args.allow_ip or args.yes: allowed=local.networks(args.allow_ip or previous,pair=True)
         else:
-            allowed=access([],[v for v in previous if v.startswith('2')],False,'IPv6 роутеров: пример 200:1111:2222:3333:4444:5555:6666:7777','router')
-            allowed+=access([],[v for v in previous if v.startswith('3')],False,'Подсети LAN: пример 300:1111:2222:3333::/64','lan')
+            allowed=access([],[v for v in previous if v.startswith('2')],False,'IPv6 роутеров для VPN — без /7','router')
+            allowed+=access([],[v for v in previous if v.startswith('3')],False,'Подсети LAN для VPN — с /64','lan')
         if ssh_enabled:
-            say('  Это ОТДЕЛЬНЫЙ список для управления сервером по SSH.\n  Доступ к VLESS не открывает SSH. Если SSH нужен с тех же устройств,\n  можно принять показанный список Enter. Ключ/пароль SSH по-прежнему нужен.')
-            ssh_allowed=access(args.ssh_allow_ip,old.get('ssh_allowed') or allowed,args.yes,'Разрешить SSH этим IP/подсетям')
-    ports=[raw_by_tag[tag]['port'] for tag in mapping.values()]
+            say('\n  Кому разрешить управление VPS по SSH','section')
+            say('  Это отдельный список. Например, другу можно выдать VPN, а SSH — только\n  себе. Для входа всё равно потребуется существующий ключ или пароль VPS.\n  Enter оставит предложенные ниже адреса. Можно ввести свой список.')
+            ssh_allowed=access(args.ssh_allow_ip,old.get('ssh_allowed') or allowed,args.yes,'Разрешённые IP и подсети для SSH')
+        else:
+            ssh_allowed=[]
     if ssh_enabled and args.ssh_port in [raw_by_tag[tag]['port'] for p,tag in mapping.items() if p!='hy2']:
         raise Error('SSH-порт совпадает с TCP-портом выбранного дополнения')
     if 'ygg' in protocols and (raw_by_tag[mapping['ygg']]['port'] in (22,2222,args.ssh_port) or args.ssh_port==2222):
@@ -169,31 +212,40 @@ def main():
         if docker['Config'].get('User') not in ('','0','root','0:0'):
             raise Error('Hysteria2: эта версия ожидает root внутри контейнера для чтения ключа 600')
         if not cert:
-            say('  Ищу действующий сертификат для '+source.address+' среди сертификатов Certbot…')
+            section(6,'Сертификат для Hysteria2')
+            say('  Проверяю существующие сертификаты Certbot. Мастер выберет тот,\n  который подходит домену Host и ещё действует.')
+            field('Домен Host',source.address)
             detected=certificates.discover(source.address)
             if detected:
                 cert,detected_key=detected
                 key=key or detected_key
-                say('  Сертификат найден автоматически: '+str(cert),'32')
+                field('Сертификат найден',str(cert))
         if not cert and not args.yes:
-            say('  Для Hysteria2 не найден действующий сертификат, подходящий домену '+source.address+'.\n  Это не сертификат для Yggdrasil: VLESS Reality его не требует.\n  Если сертификат установлен вне Certbot, укажите полный путь к fullchain.pem.\n  Имя папки может отличаться от домена, например pepegus.com или домен-0001.\n  Нужен сертификат с этим доменом в SAN или подходящий wildcard.\n  Пример пути: /etc/letsencrypt/live/ваш-домен/fullchain.pem')
+            say('  Подходящий действующий сертификат автоматически не найден.','warning')
+            say('  Он нужен только Hysteria2. Для VLESS Reality через Yggdrasil\n  TLS-сертификат не требуется. Если сертификат хранится вне Certbot,\n  введите путь к fullchain.pem. Имя папки может отличаться от домена.\n  Подойдёт сертификат этого домена или соответствующий wildcard.')
+            say('  Пример: /etc/letsencrypt/live/example.com/fullchain.pem','example')
             cert=Path(prompt('Путь к полному сертификату'))
         if not cert: raise Error('Укажите --cert и --key для Hysteria2')
         key=key or cert.parent/'privkey.pem'
-        if not cert.is_file() or not key.is_file(): raise Error('Не найдены сертификат или ключ Hysteria2')
-        check=local.run('openssl','x509','-in',str(cert),'-noout','-checkhost',source.address)
-        # Older OpenSSL can return exit status 0 even for a hostname mismatch.
-        if 'does match certificate' not in check:
-            raise Error('Сертификат Hysteria2 не подходит для домена Host '+source.address)
-    say('\n  План применения','1;35')
-    say('  Нода: '+selected.name+' · '+selected.address+'\n  Профиль: '+profile['name']+' (если общий — новые inbound не активируются на других нодах)')
+        pair=certificates.validate(cert,key,source.address)
+        field('Сертификат проверен',str(pair.cert))
+    frame('ПЛАН ПРИМЕНЕНИЯ',[(selected.name+' · '+selected.address,'value'),('Профиль: '+profile['name'],'text')])
     for p,tag in mapping.items():
         names=[s['name'] for s in all_squads if s['uuid'] in grants[p]]
-        say(f'  {LABELS[p]}: {tag}, порт {raw_by_tag[tag]["port"]}; сквады: '+(', '.join(names) or 'не добавлять доступ; настройки существующего Host сохранить'))
-    say('  Старые inbound, Host и разрешения сохраняются. Применение профиля\n  перезагружает Xray штатным механизмом панели; возможен короткий разрыв.\n  Ничего не удаляется при снятии протокола в этом мастере.','33')
-    if args.check: say('  Проверка плана успешна; изменений нет.','32'); return
-    if not args.yes and prompt('Применить этот план? да/нет','нет').lower() not in ('да','yes'):
-        say('  Отменено. Настройки не менялись.'); return
+        say('\n  '+LABELS[p],'section')
+        field('Inbound',tag)
+        field('Порт',str(raw_by_tag[tag]['port']))
+        field('Добавить доступ сквадам',', '.join(names) or 'не добавлять')
+        if not names: say('  Новый Host будет выключен; существующий Host сохранит настройки.','warning')
+    if 'ygg' in protocols:
+        field('Устройства для VPN',' '.join(allowed))
+        field('SSH через Yggdrasil','включён' if ssh_enabled else 'выключен')
+        if ssh_enabled: field('Устройства для SSH',' '.join(ssh_allowed))
+    say('\n  Применение профиля может кратко перезагрузить Xray.','warning')
+    say('  Если профиль общий, новые inbound активируются только на выбранной ноде.\n  Прежние inbound, Host и разрешения сохраняются. Отсутствие протокола\n  в текущем выборе не удаляет уже настроенное подключение.','muted')
+    if args.check: say('\n  Проверка завершена. План корректен; рабочие настройки не применялись.','success'); return
+    if not args.yes and not confirm('Применить показанный план?'):
+        say('  Отменено. Рабочие настройки не применялись.','warning'); return
     local.BASE.mkdir(parents=True,exist_ok=True,mode=0o700); local.BASE.chmod(0o700)
     import fcntl
     with (local.BASE/'install.lock').open('w') as lock:
@@ -206,13 +258,14 @@ def main():
             origin=Path(__file__).parent/filename
             if origin.resolve()!=(local.APP/filename).resolve(): shutil.copy2(origin,local.APP/filename)
             (local.APP/filename).chmod(0o700)
-        say('\n  [1/4] Подготовка зависимостей…')
+        section(1,'Применение: зависимости')
+        say('  Устанавливаю недостающие пакеты. Это может занять несколько минут.','muted')
         os.environ['DEBIAN_FRONTEND']='noninteractive'
         local.run('apt-get','update',timeout=300)
         local.run('apt-get','install','-y','python3','curl','ca-certificates','openssl','iproute2','nftables','kmod',timeout=300)
         address=old.get('address','')
         if 'ygg' in protocols:
-            say('  [2/4] Yggdrasil и списки сетевого доступа…')
+            section(2,'Применение: Yggdrasil и сетевой доступ')
             local.run('modprobe','tun',check=False)
             address=local.setup_ygg(args.peer,backup)
             legacy=json.loads((local.BASE/'state.json').read_text()) if (local.BASE/'state.json').exists() else {}
@@ -222,20 +275,28 @@ def main():
             if ssh_enabled:
                 local.run('apt-get','install','-y','openssh-server',timeout=300)
                 local.ssh_config(address,args.ssh_port)
-        else: say('  [2/4] Yggdrasil не выбран; его настройки не меняются.')
+        else: say('  Yggdrasil не выбран: прежние настройки сети и SSH сохраняются.','muted')
         ufw=bool(shutil.which('ufw') and 'Status: active' in local.run('ufw','status'))
         for p,tag in mapping.items():
             if p!='ygg' and ufw: local.run('ufw','allow',str(raw_by_tag[tag]['port'])+('/udp' if p=='hy2' else '/tcp'))
-        if 'hy2' in protocols: certificates.setup(cert,key)
-        say('  [3/4] Профиль, активные inbound и внутренние сквады…')
+        if 'hy2' in protocols: certificates.setup(pair)
+        section(3,'Применение: профиль, Host и сквады')
         # Root-only journal is useful if an API call times out after being applied.
         local.write(backup/'plan.json',json.dumps({'node':selected.uuid,'mapping':mapping,'grants':grants}))
-        created=provision.apply(api,selected,profile['config'],config,mapping,source,address,name,grants,backup)
+        provision.apply(api,selected,profile['config'],config,mapping,source,address,name,grants,backup)
+        current_profile=obj(api.request('GET','/config-profiles/'+selected.profile))
+        tags={i['uuid']:i['tag'] for i in current_profile['inbounds']}
+        inventory=[]
+        for host in api.hosts():
+            protocol=next((p for p in LABELS if 'REMNA_MULTI_'+p.upper() in host.raw.get('tags',[])),None)
+            if protocol and host.nodes==(selected.uuid,) and host.profile==selected.profile:
+                inventory.append(dict(protocol=protocol,tag=tags[host.inbound],host_uuid=host.uuid,
+                                      name=host.name,address=host.address,port=host.port,disabled=host.raw['isDisabled']))
         state=dict(panel=panel,name=name,node_uuid=selected.uuid,profile=selected.profile,source_host_uuid=source.uuid,
-                   address=address,allowed=allowed,ssh=ssh_enabled,ssh_allowed=ssh_allowed,ssh_port=args.ssh_port,hosts=created)
+                   address=address,allowed=allowed,ssh=ssh_enabled,ssh_allowed=ssh_allowed,ssh_port=args.ssh_port,hosts=inventory)
         local.write(local.BASE/'multi-state.json',json.dumps(state,ensure_ascii=False,indent=2))
         local.write(Path('/usr/local/sbin/remnawave-yggdrasil'),f'#!/bin/sh\nexec /usr/bin/python3 {local.APP}/multi.py "$@"\n',0o700)
-        say('  [4/4] Ожидание TCP-слушателей…')
+        section(4,'Применение: проверка TCP-слушателей')
         for p,tag in mapping.items():
             if p=='hy2': continue
             target=address if p=='ygg' else '127.0.0.1'
@@ -251,6 +312,13 @@ if __name__=='__main__':
     os.umask(0o077); os.environ['LC_ALL']='C'
     try: main()
     except (Error,OSError,ValueError,KeyError,subprocess.SubprocessError) as exc:
-        say('\n  Ошибка: '+str(exc),'31')
-        say('  Токен и секретная ссылка не сохраняются.\n  Если ошибка после подтверждения плана, часть изменений могла примениться.\n  Повторный запуск сохраняет существующие inbound/Host.\n  Резервные копии: /etc/remnawave-yggdrasil/backups\n  Журналы: journalctl -u yggdrasil -u remna-ygg-access -u remna-hy2-certs; docker logs --tail 80 remnanode')
+        say('\n  Установка остановлена: '+str(exc),'error')
+        say('  До подтверждения плана рабочие настройки не применяются. Если ошибка\n  возникла после подтверждения, часть шагов могла завершиться. Исправьте\n  указанную причину и повторите запуск: существующие Host не дублируются.','warning')
+        say('  Токен и секретная ссылка не сохранялись. Резервные копии и план:','muted')
+        say('  /etc/remnawave-yggdrasil/backups','example')
+        say('  Журналы:','muted')
+        say('  journalctl -u yggdrasil -u remna-ygg-access -u remna-hy2-certs\n  docker logs --tail 80 remnanode','example')
         sys.exit(1)
+    except KeyboardInterrupt:
+        say('\n  Остановлено пользователем. Если применение уже началось, часть шагов\n  могла завершиться; повторный запуск сверится с текущими настройками.','warning')
+        sys.exit(130)
