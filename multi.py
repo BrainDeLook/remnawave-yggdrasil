@@ -19,7 +19,7 @@ import node as local
 import certificates
 import provision
 
-VERSION='0.2.2'
+VERSION='0.2.3'
 FILES=('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py','ui.py')
 
 
@@ -34,7 +34,9 @@ def result():
               ('Inbound: '+host['tag'],'muted'),
               ('Host выключен — настройте доступ в панели и включите его.' if host.get('disabled') else 'Host включён; выдача зависит от разрешений сквадов.',
                'warning' if host.get('disabled') else 'text')])
-    if state.get('address'): field('IPv6 Yggdrasil этой VPS',state['address'])
+    if state.get('address'):
+        field('IPv6 Yggdrasil этой VPS',state['address'])
+        field('Доступ к VPN','по подписке, без списка IP' if state.get('access_mode')=='subscription' else 'по подписке и списку IP')
     if state.get('ssh'):
         say('\n  Команда подключения по SSH:','section')
         say('  ssh -6 -p '+str(state['ssh_port'])+' root@'+state['address'],'example')
@@ -55,6 +57,7 @@ def main():
     parser.add_argument('--protocol',action='append',choices=LABELS,default=[])
     parser.add_argument('--squad',action='append',default=[],help='UUID сквада для выбранных протоколов; повторяемый')
     parser.add_argument('--allow-ip',action='append',default=[])
+    parser.add_argument('--access-mode',choices=('subscription','restricted'),help='Yggdrasil: по учётной записи или дополнительно по списку IP')
     parser.add_argument('--ssh-allow-ip',action='append',default=[])
     ssh=parser.add_mutually_exclusive_group(); ssh.add_argument('--ssh',action='store_true'); ssh.add_argument('--no-ssh',action='store_true')
     parser.add_argument('--ssh-port',type=int)
@@ -66,6 +69,8 @@ def main():
     parser.add_argument('--result',action='store_true'); parser.add_argument('--network-only',action='store_true',help=argparse.SUPPRESS)
     parser.add_argument('--sync-certs',action='store_true',help=argparse.SUPPRESS)
     args=parser.parse_args()
+    if args.access_mode=='subscription' and args.allow_ip:
+        parser.error('--allow-ip используется только с --access-mode restricted')
     if args.network_only: local.network_only(); return
     if args.sync_certs: certificates.sync(); return
     if args.result: result(); return
@@ -164,29 +169,44 @@ def main():
             say('  Введите номера из списка через пробел или нажмите Enter.','error')
     # Omitting Yggdrasil means leave it alone, including the saved SSH/access state.
     allowed=old.get('allowed',[]); ssh_allowed=old.get('ssh_allowed',[]); ssh_enabled=old.get('ssh',False)
+    access_mode=old.get('access_mode','restricted' if allowed else 'subscription')
+    restricted_allowed=old.get('restricted_allowed',allowed)
     if 'ygg' in protocols:
         section(5,'Устройства Yggdrasil и доступ по SSH')
-        say('  Сквад определяет доступ VPN-пользователя. Сейчас укажите устройства,\n  которым разрешено соединяться с VPS по сети Yggdrasil.\n  Где взять значения: OpenWrt → Сеть → Интерфейсы → Yggdrasil.')
-        frame('Два разных поля на роутере',[
-            ('IPv6: адрес самого роутера. Уберите окончание /7.','text'),
-            ('200:1111:2222:3333:4444:5555:6666:7777','example'),
-            ('IPv6-PD: подсеть всей LAN. Оставьте окончание /64.','text'),
-            ('300:1111:2222:3333::/64','example'),
-            ('Это примеры. Вставляйте свои значения из интерфейса роутера.','warning')])
-        say('  Подсеть LAN уже охватывает ПК, даже если его IPv6 меняется.\n  Отдельный IP ПК из этой LAN не нужен. Для друзей можно добавить\n  несколько адресов роутеров и несколько LAN-подсетей через пробел.')
-        say('  В эти списки не нужно добавлять адрес самой VPS.','warning')
+        say('  VPN проверяет учётную запись Remnawave и доступ к inbound.\n  Выберите, нужно ли дополнительно ограничивать IPv6 устройств.')
+        option(1,'По подписке','любой адрес Yggdrasil; IP клиентов вводить не нужно')
+        option(2,'По подписке и списку IP','дополнительное ограничение устройств')
+        access_mode=args.access_mode or ('restricted' if args.allow_ip else access_mode)
+        if not args.yes and not args.access_mode and not args.allow_ip:
+            while True:
+                answer=prompt('Режим доступа к VPN','1' if access_mode=='subscription' else '2')
+                if answer in ('1','2'):
+                    access_mode='subscription' if answer=='1' else 'restricted'; break
+                say('  Введите 1 или 2.','error')
+        if access_mode=='subscription':
+            allowed=[]
+            say('  IP клиентов не ограничиваются. Нужны рабочая сеть Yggdrasil\n  и действующая VPN-учётная запись с доступом к этому inbound.','success')
+        else:
+            frame('Два разных поля на роутере',[
+                ('IPv6: адрес самого роутера. Уберите окончание /7.','text'),
+                ('200:1111:2222:3333:4444:5555:6666:7777','example'),
+                ('IPv6-PD: подсеть всей LAN. Оставьте окончание /64.','text'),
+                ('300:1111:2222:3333::/64','example'),
+                ('Это примеры. Вставляйте свои значения из интерфейса роутера.','warning')])
+            say('  Где взять: OpenWrt → Сеть → Интерфейсы → Yggdrasil.\n  Подсеть LAN охватывает ПК, даже если его IPv6 меняется.\n  Для друзей можно добавить несколько значений через пробел.\n  Адрес самой VPS в эти списки не вводится.')
+            if args.allow_ip or args.yes: allowed=local.networks(args.allow_ip or restricted_allowed,pair=True)
+            else:
+                allowed=access([],[v for v in restricted_allowed if v.startswith('2')],False,'IPv6 роутеров для VPN — без /7','router')
+                allowed+=access([],[v for v in restricted_allowed if v.startswith('3')],False,'Подсети LAN для VPN — с /64','lan')
+            restricted_allowed=allowed
         ssh_enabled=args.ssh or (old.get('ssh',False) and not args.no_ssh)
         if not args.yes and not args.ssh and not args.no_ssh:
             say('\n  SSH позволяет управлять VPS через Yggdrasil. Для VPN он не обязателен.')
             ssh_enabled=confirm('Разрешить также SSH через Yggdrasil?',ssh_enabled)
-        previous=old.get('allowed',[])
-        if args.allow_ip or args.yes: allowed=local.networks(args.allow_ip or previous,pair=True)
-        else:
-            allowed=access([],[v for v in previous if v.startswith('2')],False,'IPv6 роутеров для VPN — без /7','router')
-            allowed+=access([],[v for v in previous if v.startswith('3')],False,'Подсети LAN для VPN — с /64','lan')
         if ssh_enabled:
             say('\n  Кому разрешить управление VPS по SSH','section')
             say('  Это отдельный список. Например, другу можно выдать VPN, а SSH — только\n  себе. Для входа всё равно потребуется существующий ключ или пароль VPS.\n  Enter оставит предложенные ниже адреса. Можно ввести свой список.')
+            say('  Пример: IPv6 роутера 200:1111:2222:3333:4444:5555:6666:7777\n  или подсеть вашей LAN 300:1111:2222:3333::/64.\n  OpenWrt → Сеть → Интерфейсы → Yggdrasil: IPv6 без /7, IPv6-PD с /64.','example')
             ssh_allowed=access(args.ssh_allow_ip,old.get('ssh_allowed') or allowed,args.yes,'Разрешённые IP и подсети для SSH')
         else:
             ssh_allowed=[]
@@ -238,7 +258,8 @@ def main():
         field('Добавить доступ сквадам',', '.join(names) or 'не добавлять')
         if not names: say('  Новый Host будет выключен; существующий Host сохранит настройки.','warning')
     if 'ygg' in protocols:
-        field('Устройства для VPN',' '.join(allowed))
+        field('Доступ к VPN','по подписке, без списка IP' if access_mode=='subscription' else 'по подписке и списку IP')
+        if allowed: field('Устройства для VPN',' '.join(allowed))
         field('SSH через Yggdrasil','включён' if ssh_enabled else 'выключен')
         if ssh_enabled: field('Устройства для SSH',' '.join(ssh_allowed))
     say('\n  Применение профиля может кратко перезагрузить Xray.','warning')
@@ -271,7 +292,8 @@ def main():
             legacy=json.loads((local.BASE/'state.json').read_text()) if (local.BASE/'state.json').exists() else {}
             extra=tuple({legacy['port']} if legacy.get('address')==address else set())
             local.firewall(address,raw_by_tag[mapping['ygg']]['port'],allowed,args.ssh_port,ssh_allowed,
-                           args.firewall_ready,exclusive=True,extra_vpn_ports=extra)
+                           args.firewall_ready,exclusive=True,extra_vpn_ports=extra,
+                           subscription=access_mode=='subscription',extra_allowed=legacy.get('allowed',[]))
             if ssh_enabled:
                 local.run('apt-get','install','-y','openssh-server',timeout=300)
                 local.ssh_config(address,args.ssh_port)
@@ -293,7 +315,8 @@ def main():
                 inventory.append(dict(protocol=protocol,tag=tags[host.inbound],host_uuid=host.uuid,
                                       name=host.name,address=host.address,port=host.port,disabled=host.raw['isDisabled']))
         state=dict(panel=panel,name=name,node_uuid=selected.uuid,profile=selected.profile,source_host_uuid=source.uuid,
-                   address=address,allowed=allowed,ssh=ssh_enabled,ssh_allowed=ssh_allowed,ssh_port=args.ssh_port,hosts=inventory)
+                   address=address,allowed=allowed,access_mode=access_mode,restricted_allowed=restricted_allowed,
+                   ssh=ssh_enabled,ssh_allowed=ssh_allowed,ssh_port=args.ssh_port,hosts=inventory)
         local.write(local.BASE/'multi-state.json',json.dumps(state,ensure_ascii=False,indent=2))
         local.write(Path('/usr/local/sbin/remnawave-yggdrasil'),f'#!/bin/sh\nexec /usr/bin/python3 {local.APP}/multi.py "$@"\n',0o700)
         section(4,'Применение: проверка TCP-слушателей')

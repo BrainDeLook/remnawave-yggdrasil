@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 umask 077
-VERSION=v0.2.2
-BUNDLE_SHA256=ac5da2d3901165eed12443133fa1f8f0e95e867156d1d82d7d2dcfc91f7eca74
+VERSION=v0.2.3
+BUNDLE_SHA256=c9c80b36bfefdbcf0ced552ac983c55a788f8de448379fdd96121b915502bbd2
 URL="https://github.com/BrainDeLook/remnawave-yggdrasil/releases/download/$VERSION/remnawave-yggdrasil-$VERSION.tar"
 color_section='' color_text='' color_error='' color_reset=''
 if [[ -t 1 && ${TERM:-} != dumb && ! -v NO_COLOR ]]; then

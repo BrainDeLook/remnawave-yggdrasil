@@ -285,6 +285,39 @@ print('PASS dedicated Ygg port: owner can connect only to Ygg address, other int
         subprocess.run(partial_args,check=True)
         assert len(json.loads(Path('/etc/remnawave-yggdrasil/multi-state.json').read_text())['hosts'])==4
         print('PASS multi-mode SSH disable and complete Host inventory after partial rerun',flush=True)
+        # Switching modes must open only the new VPN port, never SSH or legacy 443.
+        subscription_args=partial_args[:]
+        while '--allow-ip' in subscription_args:
+            index=subscription_args.index('--allow-ip'); del subscription_args[index:index+2]
+        subscription_args+=['--access-mode','subscription']
+        subprocess.run(subscription_args,check=True)
+        opened=json.loads(Path('/etc/remnawave-yggdrasil/multi-state.json').read_text())
+        assert opened['access_mode']=='subscription' and opened['allowed']==[] and not opened['ssh_allowed']
+        mode_check="""import socket,sys
+for target,port,expected in [(sys.argv[1],1488,True),(sys.argv[1],443,False),
+                              (sys.argv[1],22,False),('200:db8::ffff',1488,False)]:
+ with socket.socket(socket.AF_INET6,socket.SOCK_STREAM) as s:
+  s.settimeout(3);s.bind(('200:db8::222',0))
+  try:s.connect((target,port));connected=True
+  except (TimeoutError,ConnectionRefusedError):connected=False
+  assert connected==expected,(target,port,connected)
+print('PASS subscription mode: unlisted Ygg source allowed, legacy/SSH/other destination blocked')
+"""
+        print(run(*ns,sys.executable,'-c',mode_check,address))
+        client=export(ygg_raw,dict(source,address=address,port=1488),user)[1]
+        verify(client)
+        # Network access alone must not grant VLESS access to another squad's user.
+        denied=dict(client,uuid=restricted['vlessUuid'])
+        try: verify(denied)
+        except Error: pass
+        else: raise AssertionError('User without Ygg inbound access authenticated')
+        # A rerun keeps the selected mode; explicit restriction restores the saved ACL.
+        subprocess.run(subscription_args[:-2],check=True)
+        assert json.loads(Path('/etc/remnawave-yggdrasil/multi-state.json').read_text())['access_mode']=='subscription'
+        subprocess.run(subscription_args[:-2]+['--access-mode','restricted'],check=True)
+        closed=json.loads(Path('/etc/remnawave-yggdrasil/multi-state.json').read_text())
+        assert closed['access_mode']=='restricted' and closed['allowed']==state['allowed']
+        print('PASS subscription authentication, saved mode and restoration of restricted ACL',flush=True)
         run('ip','link','del','ry-host'); run('ip','netns','del','remna-ygg-ci')
     finally:
         peer.terminate();peer.wait(timeout=10);peer_log.close()

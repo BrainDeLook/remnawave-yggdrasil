@@ -282,7 +282,11 @@ WantedBy=multi-user.target
 
 
 def firewall(address: str, port: int, allowed: list[str], ssh_port: int, ssh_allowed: list[str], ready: bool = False,
-             exclusive: bool = False, extra_vpn_ports: tuple[int,...] = ()):
+             exclusive: bool = False, extra_vpn_ports: tuple[int,...] = (), subscription: bool = False,
+             extra_allowed: list[str] | None = None):
+    vpn_clients = ['200::/7'] if subscription else allowed
+    legacy_clients = allowed if extra_allowed is None else extra_allowed
+    legacy_ports = sorted(set(extra_vpn_ports)-{port})
     ufw = bool(shutil.which('ufw') and 'Status: active' in run('ufw','status'))
     if ufw and not re.search(r'(?m)^IPV6=yes\s*$',Path('/etc/default/ufw').read_text()):
         raise Error('У активного UFW отключён IPv6. Включите поддержку IPv6 до установки.')
@@ -294,19 +298,22 @@ def firewall(address: str, port: int, allowed: list[str], ssh_port: int, ssh_all
             if chain.get('policy') == 'drop' or nonempty:
                 raise Error('Нестандартный INPUT firewall: настройте точечный доступ и повторите с --firewall-ready. Правила Docker не менялись.')
     if ufw:
-        for service_port,clients in [(p,allowed) for p in (port,*extra_vpn_ports)]+[(ssh_port,ssh_allowed)]:
+        for service_port,clients in [(port,vpn_clients)]+[(p,legacy_clients) for p in legacy_ports]+[(ssh_port,ssh_allowed)]:
             for client in clients:
                 run('ufw','allow','in','from',client,'to',address,'port',str(service_port),'proto','tcp','comment','remna-ygg')
     sets = lambda values: ', '.join(values)
     text = f'''table inet {TABLE} {{
- set vpn_clients {{ type ipv6_addr; flags interval; auto-merge; elements = {{ {sets(allowed)} }} }}
+ set vpn_clients {{ type ipv6_addr; flags interval; auto-merge; elements = {{ {sets(vpn_clients)} }} }}
+ set legacy_clients {{ type ipv6_addr; flags interval; auto-merge; {('elements = { '+sets(legacy_clients)+' };') if legacy_clients else ''} }}
  set ssh_clients {{ type ipv6_addr; flags interval; auto-merge; {('elements = { '+sets(ssh_allowed)+' };') if ssh_allowed else ''} }}
  chain vpn {{ ip6 saddr @vpn_clients accept; counter drop; }}
+ chain legacy {{ ip6 saddr @legacy_clients accept; counter drop; }}
  chain ssh {{ ip6 saddr @ssh_clients accept; counter drop; }}
  chain input {{
   type filter hook input priority -10; policy accept;
   iifname "lo" accept
-  ip6 daddr {address} tcp dport {{ {', '.join(map(str,sorted({port,*extra_vpn_ports})))} }} jump vpn
+  ip6 daddr {address} tcp dport {port} jump vpn
+  {('ip6 daddr '+address+' tcp dport { '+', '.join(map(str,legacy_ports))+' } jump legacy') if legacy_ports else ''}
   {f'tcp dport {port} counter drop' if exclusive else ''}
   ip6 daddr {address} tcp dport {{ {', '.join(map(str,sorted({22,ssh_port})))} }} jump ssh
  }}
