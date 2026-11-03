@@ -1,5 +1,8 @@
 # Remnawave + Yggdrasil
 
+> [!NOTE]
+> Это архивная инструкция для мастера **0.1.x**. Для текущей установки используйте [основной README](../README.md). Новый мастер создаёт отдельные inbound и не запрашивает Username VPN-пользователя.
+
 [![Проверки](https://github.com/BrainDeLook/remnawave-yggdrasil/actions/workflows/check.yml/badge.svg)](https://github.com/BrainDeLook/remnawave-yggdrasil/actions/workflows/check.yml)
 
 Установщик запускается **на VPS уже работающей Remnanode** и добавляет подключение через Yggdrasil в ту же панель Remnawave. Второй sing-box/Xray для обслуживания клиентов не устанавливается: используются существующий VLESS TCP Reality inbound, UUID пользователей, лимиты и учёт трафика панели.
