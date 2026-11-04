@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from textwrap import dedent
+import time
 import unicodedata
 
 LOG_DIR=Path('/var/log/remnawave-yggdrasil')
@@ -21,6 +22,7 @@ BANNER=(
     '██║  ██║███████╗██║ ╚═╝ ██║██║ ╚████║██║  ██║   ██║   ╚██████╔╝╚██████╔╝',
     '╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝   ╚═╝    ╚═════╝  ╚═════╝ ',
 )
+PALETTE_REPLY=re.compile(rb'\x1b\]4;255;([^\x07\x1b]{0,100})(?:\x07|\x1b\\)')
 
 
 def clean(text: str) -> str:
@@ -82,12 +84,46 @@ def content_start(height: int,columns: int) -> int:
     return 9 if height>=25 and columns>=90 else 4
 
 
+def terminal_profile() -> tuple[str,bytes,bool]:
+    """Confirm extended colours without changing the shell or its colour table."""
+    term=os.environ.get('TERM','')
+    if ('NO_COLOR' in os.environ or not sys.stdin.isatty() or not sys.stdout.isatty()
+            or term not in ('xterm','xterm-color')):
+        return term,b'',False
+    if os.environ.get('COLORTERM','').lower() in ('truecolor','24bit','256color'):
+        return 'xterm-256color',b'',False
+    import select
+    import termios
+    descriptor=sys.stdin.fileno(); settings=termios.tcgetattr(descriptor)
+    probe=termios.tcgetattr(descriptor)
+    probe[3]&=~(termios.ICANON|termios.ECHO)
+    probe[6][termios.VMIN]=0; probe[6][termios.VTIME]=0
+    data=b''; deadline=time.monotonic()+0.6
+    try:
+        termios.tcsetattr(descriptor,termios.TCSANOW,probe)
+        # OSC 4 queries index 255; '?' reads the palette and never writes it.
+        sys.stdout.write('\x1b]4;255;?\x1b\\'); sys.stdout.flush()
+        while time.monotonic()<deadline and len(data)<4096:
+            if not select.select([descriptor],[],[],max(0,deadline-time.monotonic()))[0]: break
+            part=os.read(descriptor,4096-len(data))
+            if not part: break
+            data+=part
+            match=PALETTE_REPLY.search(data)
+            if match:
+                supported=re.fullmatch(rb'rgb:[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4}',match[1])
+                return ('xterm-256color' if supported else term),data[:match.start()]+data[match.end():],False
+    finally:
+        termios.tcsetattr(descriptor,termios.TCSANOW,settings)
+    return term,data,True
+
+
 class Screen:
     def __init__(self,window,curses,version: str):
         self.window=window; self.curses=curses; self.version=version
         self.title='Главное меню'; self.lines=[]; self.offset=0; self.page_size=1; self.input_row=6
         self.answers=[]; self.position=0; self.replay_until=0
         self.environment={}; self.secrets=set(); self.applying=False; self.log=None
+        self.pending=deque(); self.palette_query_pending=False
         self.palette={}
         if curses.has_colors() and 'NO_COLOR' not in os.environ:
             curses.start_color(); curses.use_default_colors()
@@ -178,8 +214,30 @@ class Screen:
             del self.answers[index:]; self.answers.append(Answer(key,answer))
         return answer
 
+    def read_key(self):
+        """Discard a late palette reply, preserving ordinary early user input."""
+        while True:
+            value=self.pending.popleft() if self.pending else self.window.get_wch()
+            if value!='\x1b' or not self.palette_query_pending: return value
+            captured=''; deadline=time.monotonic()+0.1
+            self.window.timeout(100)
+            try:
+                while time.monotonic()<deadline and len(captured)<128:
+                    char=self.pending.popleft() if self.pending else self.window.get_wch()
+                    if not isinstance(char,str): self.pending.appendleft(char); break
+                    captured+=char
+                    if not ']4;255;'.startswith(captured) and not captured.startswith(']4;255;'): break
+                    if captured.endswith(('\x07','\x1b\\')): break
+            except self.curses.error: pass
+            finally: self.window.timeout(-1)
+            if PALETTE_REPLY.fullmatch(('\x1b'+captured).encode()):
+                self.palette_query_pending=False
+                continue
+            self.pending.extendleft(reversed(captured))
+            return value
+
     def key(self):
-        value=self.window.get_wch()
+        value=self.read_key()
         if value=='\x03': raise KeyboardInterrupt
         if value in ('\x1b',self.curses.KEY_LEFT):
             if self.applying: return None
@@ -208,7 +266,7 @@ class Screen:
                         column=4 if secret else 4+width(value[start:cursor])
                         self.window.move(min(self.input_row,max(0,current_height-2)),min(column,max(0,current_columns-2)))
                         self.window.refresh()
-                    key=self.window.get_wch()
+                    key=self.read_key()
                     if key=='\x03': raise KeyboardInterrupt
                     if key=='\x1b': raise Back(self.position-2)
                     if key in ('\n','\r',self.curses.KEY_ENTER):
@@ -288,7 +346,7 @@ class Screen:
         while True:
             footer='↑↓ / PgUp/PgDn текст · Home/End начало/конец\nEnter / Esc — назад' if len(self.lines)>self.page_size else 'Enter / Esc — назад'
             self.draw('',footer)
-            key=self.window.get_wch()
+            key=self.read_key()
             if key in ('\x1b','\n','\r',self.curses.KEY_ENTER): return
             if key=='\x03': raise KeyboardInterrupt
             if key in (self.curses.KEY_DOWN,self.curses.KEY_NPAGE): self.offset+=1 if key==self.curses.KEY_DOWN else self.page_size
@@ -401,14 +459,23 @@ def launch(callback,result,version: str,argv: list[str]) -> bool:
     except ImportError: return False
     # Locale is for wide-character input/rendering only; commands keep LC_ALL=C.
     locale.setlocale(locale.LC_CTYPE,'C.UTF-8')
+    original_term=os.environ.get('TERM','')
+    selected_term,pending,query_pending=terminal_profile()
     window=None
     try:
+        # A failed optional 256-colour terminfo lookup falls back to the original.
+        try: curses.setupterm(term=selected_term)
+        except curses.error: selected_term=original_term
+        os.environ['TERM']=selected_term
         window=curses.initscr(); curses.noecho(); curses.cbreak(); window.keypad(True)
         curses.set_escdelay(40); curses.curs_set(0)
         app=Screen(window,curses,version)
+        app.pending.extend(pending.decode('utf-8',errors='replace'))
+        app.palette_query_pending=query_pending
     except (curses.error,KeyboardInterrupt) as exc:
         if window is not None:
             window.keypad(False); curses.nocbreak(); curses.echo(); curses.endwin()
+        os.environ['TERM']=original_term
         return isinstance(exc,KeyboardInterrupt)
     import ui
     from api import Error
@@ -451,4 +518,5 @@ def launch(callback,result,version: str,argv: list[str]) -> bool:
     finally:
         app.finish(); app.environment.clear(); app.secrets.clear(); ui.screen=None
         window.keypad(False); curses.nocbreak(); curses.echo(); curses.endwin()
+        os.environ['TERM']=original_term
         if interrupted: print('Применение прервано. Часть шагов могла завершиться; журнал: '+str(LOG_DIR/'installer.log'))

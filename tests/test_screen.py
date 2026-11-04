@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from screen import Answer,Back,Screen,available,clean,clip,content_start,width,wrap
+from screen import Answer,Back,Screen,available,clean,clip,content_start,terminal_profile,width,wrap
 import node
 import ui
 
@@ -21,6 +21,7 @@ class Window:
     def erase(self): self.cells={}
     def clear(self): pass
     def refresh(self): pass
+    def timeout(self,value): pass
     def move(self,row,col):
         assert 0<=row<self.size[0] and 0<=col<self.size[1]
     def get_wch(self): return next(self.keys)
@@ -33,10 +34,28 @@ class Window:
 def terminal(window):
     constants={name:100+i for i,name in enumerate(('KEY_LEFT','KEY_RIGHT','KEY_UP','KEY_DOWN',
         'KEY_PPAGE','KEY_NPAGE','KEY_HOME','KEY_END','KEY_DC','KEY_BACKSPACE','KEY_ENTER','KEY_RESIZE'))}
-    return Screen(window,SimpleNamespace(**constants,A_REVERSE=0,has_colors=lambda:False,curs_set=lambda n:None),'test')
+    return Screen(window,SimpleNamespace(**constants,A_REVERSE=0,error=RuntimeError,has_colors=lambda:False,curs_set=lambda n:None),'test')
 
 
 class ScreenTests(unittest.TestCase):
+    def test_declared_extended_colours_and_no_color_need_no_probe(self):
+        with patch('sys.stdin.isatty',return_value=True),patch('sys.stdout.isatty',return_value=True):
+            with patch.dict(os.environ,TERM='xterm',COLORTERM='truecolor'):
+                os.environ.pop('NO_COLOR',None)
+                self.assertEqual(terminal_profile(),('xterm-256color',b'',False))
+                self.assertEqual(os.environ['TERM'],'xterm')
+            with patch.dict(os.environ,TERM='xterm',COLORTERM='truecolor',NO_COLOR='1'):
+                self.assertEqual(terminal_profile(),('xterm',b'',False))
+            with patch.dict(os.environ,TERM='linux'):
+                self.assertEqual(terminal_profile(),('linux',b'',False))
+
+    def test_late_palette_reply_does_not_exit_menu_or_lose_input(self):
+        app=terminal(Window()); app.palette_query_pending=True
+        app.pending.extend('\x1b]4;255;rgb:ffff/ffff/ffff\x1b\\я\n')
+        self.assertEqual(app.read_key(),'я')
+        self.assertEqual(app.read_key(),'\n')
+        self.assertFalse(app.palette_query_pending)
+
     def test_tiny_resize_does_not_block_selection(self):
         window=Window(size=(18,4)); app=terminal(window)
         def resize():
@@ -232,6 +251,38 @@ class ScreenTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform=='linux','Real curses/PTY is verified on Linux CI')
 class PtyTests(unittest.TestCase):
+    def test_real_terminal_colour_probe_and_timeout_restore_input_settings(self):
+        import fcntl
+        import pty
+        import select
+        import struct
+        import termios
+        import time
+        for reply,expected,pending in [
+            (b'early\x1b]4;255;rgb:ffff/ffff/ffff\x1b\\','xterm-256color','early'),
+            (None,'xterm','')]:
+            with self.subTest(expected=expected),tempfile.TemporaryDirectory() as directory:
+                master,slave=pty.openpty(); before=termios.tcgetattr(slave)
+                path=Path(directory)/'profile.json'
+                code=('import json,os; from pathlib import Path; from screen import terminal_profile; '
+                      'term,pending,late=terminal_profile(); '
+                      'Path(__import__("sys").argv[1]).write_text(json.dumps([term,pending.decode(),os.environ["TERM"]]))')
+                process=subprocess.Popen([sys.executable,'-c',code,str(path)],stdin=slave,stdout=slave,stderr=slave,
+                    env={k:v for k,v in dict(os.environ,TERM='xterm').items() if k not in ('NO_COLOR','COLORTERM')})
+                try:
+                    output=b''; deadline=time.monotonic()+5
+                    while b'\x1b]4;255;?\x1b\\' not in output and time.monotonic()<deadline:
+                        if select.select([master],[],[],.1)[0]: output+=os.read(master,65536)
+                    self.assertIn(b'\x1b]4;255;?\x1b\\',output)
+                    if reply: os.write(master,reply)
+                    self.assertEqual(process.wait(timeout=5),0)
+                    import json
+                    self.assertEqual(json.loads(path.read_text()),[expected,pending,'xterm'])
+                    self.assertEqual(termios.tcgetattr(slave),before)
+                finally:
+                    if process.poll() is None: process.kill(); process.wait(timeout=5)
+                    os.close(master); os.close(slave)
+
     def test_real_terminal_back_resize_secret_and_apply(self):
         import fcntl
         import pty
