@@ -20,37 +20,71 @@ import node as local
 import certificates
 import provision
 
-VERSION='0.3.1'
+VERSION='0.3.2'
 FILES=('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py','ui.py','screen.py')
 
 
-def result():
-    ui.page('Сохранённые подключения')
+def result(*, after_install=False):
+    ui.page('Результат установки' if after_install else 'Сохранённые подключения')
     path=local.BASE/'multi-state.json'
     if not path.exists(): raise Error('Сохранённых подключений пока нет. Сначала выберите установку дополнительных протоколов.')
     state=json.loads(path.read_text())
-    frame('УСТАНОВКА ЗАВЕРШЕНА',[(state['name'],'success'),('Ниже — сохранённые настройки этой ноды.','text')],'success')
-    field('Профиль в панели',state['profile'])
+    if after_install:
+        frame('УСТАНОВКА ЗАВЕРШЕНА',[('Настройки применены. Обновите подписку в своём VPN-клиенте.','success')],'success')
+    frame('НОДА',[(state['name'],'value'),
+          ('Панель: '+state['panel'],'example'),
+          ('Профиль: '+state.get('profile_name',state['profile']),'text'),
+          ('Снимок: '+state['saved_at'] if state.get('saved_at') else 'Снимок последней установки; время не сохранено.','muted'),
+          ('Это сохранённые настройки. Последующие изменения в панели здесь не отражаются.','muted')])
     for host in state['hosts']:
         endpoint=('['+host['address']+']') if ':' in host['address'] else host['address']
-        frame(LABELS[host['protocol']],[(host['name'],'value'),
-              ('Адрес: '+endpoint+':'+str(host['port']),'example'),
+        frame(host['name'],[('Протокол: '+LABELS[host['protocol']],'text'),
+              ('Сервер: '+endpoint+':'+str(host['port']),'example'),
               ('Inbound: '+host['tag'],'muted'),
-              ('Host выключен — настройте доступ в панели и включите его.' if host.get('disabled') else 'Host включён; выдача зависит от разрешений сквадов.',
+              ('Выключен: назначьте сквады в панели и включите Host.' if host.get('disabled') else 'Включён: показ в подписке зависит от разрешений сквадов.',
                'warning' if host.get('disabled') else 'text')])
+    frame('ПОДПИСКА',[
+          ('Используйте личную подписку VPN-пользователя из Remnawave.','text'),
+          ('Обновите её в клиенте и выберите одно из подключений выше.','text'),
+          ('Общей VPN-ссылки и UUID нет: у каждого пользователя свои реквизиты.','muted')])
     if state.get('address'):
-        field('IPv6 Yggdrasil этой VPS',state['address'])
-        field('Доступ к VPN','по подписке, без списка IP' if state.get('access_mode')=='subscription' else 'по подписке и списку IP')
+        network=[('IPv6 этой VPS: '+state['address'],'example'),
+                 ('VPN: по подписке, без списка IP.' if state.get('access_mode')=='subscription' else
+                  'VPN: по подписке и списку разрешённых IP.','text')]
+        if state.get('access_mode')!='subscription':
+            network.extend((value,'value') for value in state.get('allowed',[]))
+        frame('YGGDRASIL',network)
     if state.get('ssh'):
-        say('\n  Команда подключения по SSH:','section')
-        say('  ssh -6 -p '+str(state['ssh_port'])+' root@'+state['address'],'example')
-    elif state.get('address'): say('  SSH через Yggdrasil выключен.','muted')
-    say('\n  Что делать дальше','section')
-    say('  1. В Remnawave откройте «Внутренние сквады» и проверьте доступ к inbound.\n  2. В «Хостах» проверьте ограничения сквадов и включите нужные Host.\n  3. Обновите свою подписку в VPN-клиенте и выберите новый сервер.\n  Управление подключениями дальше выполняется в обычной панели Remnawave.')
+        frame('SSH',[
+              ('ssh -6 -p '+str(state['ssh_port'])+' root@'+state['address'],'example'),
+              ('Разрешённые источники подключения:','muted'),
+              *((value,'value') for value in state['ssh_allowed']),
+              ('root замените своим Linux-пользователем. Нужен его ключ или пароль VPS.','muted')])
+    elif state.get('address'):
+        frame('SSH',[('Доступ через Yggdrasil выключен. VPN работает независимо от SSH.','muted')])
+    checks=[]
+    if state.get('verification')=='listeners':
+        checked=state.get('checked_protocols',[])
+        checks.append(('TCP-слушатели проверены: '+', '.join(HOST_SUFFIXES[p] for p in checked)+'.','text') if checked else
+                      ('TCP-проверки не выполнялись: в этом запуске выбран Hysteria2 (UDP).','muted'))
+        if state.get('checked_at'): checks.append(('Время проверки: '+state['checked_at'],'muted'))
+    elif state.get('verification')=='pending':
+        checks.append(('Проверка TCP-слушателей не завершена. Откройте диагностику и повторите настройку.','warning'))
+    else:
+        checks.append(('Результат проверки слушателей в этом снимке не сохранён.','warning'))
+    if any(host['protocol']=='hy2' for host in state['hosts']):
+        checks.append(('Hysteria2 использует UDP; подключение проверяйте в VPN-клиенте.','text'))
+    checks.append(('HTTPS и VPN-авторизацию проверьте в своём клиенте.','muted'))
+    frame('ПРОВЕРКА',checks)
+    frame('ЕСЛИ ПОДКЛЮЧЕНИЯ НЕТ',[
+          ('1. Внутренние сквады: разрешите пользователю нужный inbound.','text'),
+          ('2. Хосты: проверьте включённость Host и ограничения сквадов.','text'),
+          ('3. Обновите подписку в клиенте; при ошибке откройте диагностику.','text')])
     if state.get('address'):
-        say('\n  Тахион / OpenWrt','warning')
-        say('  В некоторых версиях Тахиона требуется bind_interface: "yggdrasil".\n  Эту привязку задают на роутере: обычная VLESS-подписка её не передаёт.','warning')
-    say('\n  Проверены настройки API и TCP-слушатели. Открытие сайтов проверьте\n  в своём клиенте после обновления подписки. Вывод выше — сохранённый\n  результат установки; изменения в панели после запуска здесь не отражаются.','muted')
+        frame('ТАХИОН / OPENWRT',[
+              ('Если Ygg работает в другом клиенте, а в Тахионе не отвечает:','text'),
+              ('проверьте bind_interface: "yggdrasil" у этого outbound на роутере.','example'),
+              ('Некоторым версиям Тахиона нужна эта привязка; VLESS-подписка её не передаёт.','muted')],'warning')
 
 
 def main(argv=None):
@@ -143,11 +177,6 @@ def main(argv=None):
     field('Исходный inbound',base)
     section(3,'Какие подключения добавить')
     say('  Обычный TCP Reality сохраняется. Дополнения можно выбирать независимо.\n  Если такой протокол уже есть в профиле, мастер использует его настройки.')
-    if not ui.fullscreen():
-        option(1,'Hysteria2','UDP 443; требуется TLS-сертификат домена')
-        option(2,'VLESS gRPC Reality','TCP 8443')
-        option(3,'VLESS XHTTP Reality','TCP 4443')
-        option(4,'VLESS Reality через Yggdrasil','TCP 1488; сеть Yggdrasil')
     say('  Отметьте дополнения пробелом и нажмите Enter.' if ui.fullscreen() else
         '  Пример ввода: 4 — только Yggdrasil; 1 4 — Hysteria2 и Yggdrasil.','example')
     protocols=args.protocol
@@ -371,9 +400,10 @@ def main(argv=None):
             if protocol and host.nodes==(selected.uuid,) and host.profile==selected.profile:
                 inventory.append(dict(protocol=protocol,tag=tags[host.inbound],host_uuid=host.uuid,
                                       name=host.name,address=host.address,port=host.port,disabled=host.raw['isDisabled']))
-        state=dict(panel=panel,name=name,node_uuid=selected.uuid,profile=selected.profile,source_host_uuid=source.uuid,
+        state=dict(panel=panel,name=name,node_uuid=selected.uuid,profile=selected.profile,profile_name=profile['name'],source_host_uuid=source.uuid,
                    address=address,allowed=allowed,access_mode=access_mode,restricted_allowed=restricted_allowed,
-                   ssh=ssh_enabled,ssh_allowed=ssh_allowed,ssh_port=args.ssh_port,hosts=inventory)
+                   ssh=ssh_enabled,ssh_allowed=ssh_allowed,ssh_port=args.ssh_port,hosts=inventory,
+                   saved_at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),verification='pending')
         local.write(local.BASE/'multi-state.json',json.dumps(state,ensure_ascii=False,indent=2))
         local.write(Path('/usr/local/sbin/remnawave-yggdrasil'),f'#!/bin/sh\nexec /usr/bin/python3 {local.APP}/multi.py "$@"\n',0o700)
         section(4,'Применение: проверка TCP-слушателей')
@@ -386,7 +416,10 @@ def main(argv=None):
                 except OSError:
                     if attempt==29: raise Error('Не появился слушатель '+tag+'. Проверьте журнал ноды и профиль; уже созданные настройки сохранены.') from None
                     time.sleep(2)
-    result()
+        state.update(verification='listeners',checked_protocols=[p for p in mapping if p!='hy2'],
+                     checked_at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'))
+        local.write(local.BASE/'multi-state.json',json.dumps(state,ensure_ascii=False,indent=2))
+    result(after_install=True)
 
 if __name__=='__main__':
     os.umask(0o077); os.environ['LC_ALL']='C'

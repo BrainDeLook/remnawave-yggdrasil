@@ -4,10 +4,10 @@ import getpass
 import os
 import shutil
 import sys
-import textwrap
 from typing import Literal
 from api import Error
 import node as local
+from screen import clean, width, wrap
 
 screen = None
 
@@ -44,7 +44,7 @@ def paint(text: str, tone: Tone = 'text') -> str:
 def say(text: str = '', tone: Tone = 'text'):
     if screen is not None:
         screen.say(text,tone); return
-    print(paint(text,tone),flush=True)
+    print(paint(clean(text),tone),flush=True)
 
 
 def section(number: int, title: str):
@@ -55,7 +55,7 @@ def section(number: int, title: str):
 
 def field(label: str, value: str):
     if screen is not None:
-        screen.say(label+': '+value,'value'); return
+        screen.say(label+': '+value,'text'); return
     print(paint('  '+label+': ','muted')+paint(value,'value'),flush=True)
 
 
@@ -68,15 +68,17 @@ def option(number: int, title: str, detail: str = ''):
 
 def panel(title: str, lines: list[tuple[str,Tone]], tone: Tone = 'section'):
     if screen is not None:
-        screen.say(title,tone)
+        if screen.lines: screen.say('')
+        screen.say('── '+title+' ──',tone)
         for text,line_tone in lines: screen.say(text,line_tone)
         return
-    width=max(40,min(88,shutil.get_terminal_size((88,24)).columns-4))
-    say('\n  ┌'+'─'*(width-2)+'┐',tone)
+    columns=max(12,min(88,shutil.get_terminal_size((88,24)).columns-4))
+    say('\n  ┌'+'─'*(columns-2)+'┐',tone)
     for line,line_tone in [(title,tone),*lines]:
-        for wrapped in textwrap.wrap(line,width-6,replace_whitespace=False) or ['']:
-            print(paint('  │ ',tone)+paint(wrapped,line_tone)+' '*(width-3-len(wrapped))+paint('│',tone),flush=True)
-    say('  └'+'─'*(width-2)+'┘',tone)
+        for paragraph in clean(line).splitlines() or ['']:
+            for wrapped in wrap(paragraph,columns-4):
+                print(paint('  │ ',tone)+paint(wrapped,line_tone)+' '*(columns-3-width(wrapped))+paint('│',tone),flush=True)
+    say('  └'+'─'*(columns-2)+'┘',tone)
 
 
 def prompt(label: str, default: str = '') -> str:

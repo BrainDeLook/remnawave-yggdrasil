@@ -1,5 +1,6 @@
 """SSH-friendly terminal screens. Navigation replays only the read-only wizard."""
 from __future__ import annotations
+from collections import deque
 from dataclasses import dataclass
 import locale
 import os
@@ -7,9 +8,17 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from textwrap import dedent
 import unicodedata
 
 LOG_DIR=Path('/var/log/remnawave-yggdrasil')
+ESCAPES=re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))')
+
+
+def clean(text: str) -> str:
+    """Normalize external terminal output before measuring or rendering it."""
+    text=ESCAPES.sub('',text).expandtabs(4)
+    return ''.join(c if c.isprintable() or c=='\n' else ' ' for c in text)
 
 
 class Back(Exception):
@@ -36,12 +45,23 @@ def clip(text: str, columns: int) -> str:
 
 
 def wrap(text: str,columns: int) -> list[str]:
+    columns=max(2,columns)
     lines=[]
     while text:
         part=clip(text,columns)
         if len(part)<len(text) and part.rfind(' ')>len(part)//2: part=part[:part.rfind(' ')]
         lines.append(part); text=text[len(part):].lstrip(' ')
     return lines or ['']
+
+
+def elide(text: str,columns: int) -> str:
+    """Keep both the beginning and identifying suffix of a long menu title."""
+    if width(text)<=columns: return text
+    tail=''; limit=max(0,(columns-1)//2)
+    for char in reversed(text):
+        if width(char+tail)>limit: break
+        tail=char+tail
+    return clip(text,max(0,columns-1-width(tail)))+'…'+tail
 
 
 def available(argv: list[str]) -> bool:
@@ -55,7 +75,7 @@ class Screen:
         self.window=window; self.curses=curses; self.version=version
         self.title='Главное меню'; self.lines=[]; self.offset=0; self.page_size=1; self.input_row=6
         self.answers=[]; self.position=0; self.replay_until=0
-        self.environment={}; self.applying=False; self.log=None
+        self.environment={}; self.secrets=set(); self.applying=False; self.log=None
         self.palette={}
         if curses.has_colors() and 'NO_COLOR' not in os.environ:
             curses.start_color(); curses.use_default_colors()
@@ -67,8 +87,7 @@ class Screen:
     def line(self,row: int,text: str,tone: str='text',reverse: bool=False):
         height,columns=self.window.getmaxyx()
         if not 0<=row<height: return
-        text=re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',text)
-        value=clip(''.join(c if c.isprintable() else ' ' for c in text),max(0,columns-4))
+        value=clip(clean(text).replace('\n',' '),max(0,columns-4))
         style=self.palette.get(tone,0) | (self.curses.A_REVERSE if reverse else 0)
         self.window.addstr(row,2,value,style)
 
@@ -78,15 +97,21 @@ class Screen:
             self.line(1,'Увеличьте окно: нужно от 54 × 18.','warning')
             self.line(3,'Размер сейчас: '+str(columns)+' × '+str(height))
             window.refresh(); return False
-        self.line(0,'Remnawave + Yggdrasil · '+self.version,'section')
-        self.line(2,self.title,'section')
+        inner=columns-6
+        brand=' YGG / REMNAWAVE '
+        version=' v'+self.version+' '
+        self.line(0,'╭─'+brand+'─'*max(0,inner-width(brand+version)-1)+version+'╮','section')
+        title=elide(self.title,inner-2)
+        self.line(1,'│ '+title+' '*(inner-1-width(title))+'│','section')
+        self.line(2,'╰'+'─'*inner+'╯','section')
         rows=[]
         for text,tone in self.lines:
             for paragraph in text.splitlines() or ['']:
-                rows.extend((part,tone) for part in wrap(paragraph,columns-5))
+                rows.extend((part,tone) for part in wrap(clean(paragraph),columns-5))
         # Body, question and controls form one block; only long bodies scroll.
-        labels=wrap(label,columns-5) if label else []
-        space=max(1,height-8-len(extra)-len(labels)) if label or extra else height-6
+        labels=wrap(clean(label),columns-5) if label else []
+        footers=wrap(footer,columns-5)
+        space=max(1,height-7-len(extra)-len(labels)-len(footers)) if label or extra else height-5-len(footers)
         self.page_size=max(1,space)
         self.offset=max(0,min(self.offset,max(0,len(rows)-space)))
         visible=rows[self.offset:self.offset+space]
@@ -97,20 +122,23 @@ class Screen:
         for index,(text,tone,reverse) in enumerate(extra): self.line(self.input_row+index,text,tone,reverse)
         if len(rows)>space:
             self.line(3,f'Текст: PgUp/PgDn · {self.offset+1}–{self.offset+len(visible)} из {len(rows)}','muted')
-        self.line(min(height-1,self.input_row+len(extra)+1),footer,'muted')
+        footer_row=min(height-len(footers),self.input_row+len(extra)+1)
+        for row,part in enumerate(footers,footer_row): self.line(row,part,'muted')
         window.refresh(); return True
 
     def page(self,title: str):
         self.title=title; self.lines=[]; self.offset=0
+        if self.log: self.command_log('\n[ЭТАП] '+title)
         self.window.clear()
         if self.position>=self.replay_until: self.draw(footer='Подготовка…')
 
     def say(self,text: str,tone: str='text'):
-        self.lines.append(('\n'.join(line.strip() for line in text.strip('\n').splitlines()),tone))
+        text=self.redact(dedent(clean(text)).strip('\n'))
+        self.lines.append((text,tone))
         if self.log:
             self.log.write(text+'\n'); self.log.flush()
         if self.position>=self.replay_until:
-            self.offset=max(0,len(self.lines)*3)
+            self.offset=sys.maxsize if self.applying else 0
             self.draw(footer='Выполняется текущий этап. Журнал — в меню диагностики.' if self.applying else 'Подготовка…')
 
     def remember(self,key: tuple,default,read):
@@ -120,6 +148,7 @@ class Screen:
             del self.answers[index:]; previous=None
         if previous is not None and index<self.replay_until: return previous.value
         answer=read(previous.value if previous is not None else default)
+        if key[0]=='secret' and answer: self.secrets.add(answer)
         if previous is None or answer!=previous.value:
             del self.answers[index:]; self.answers.append(Answer(key,answer))
         return answer
@@ -186,13 +215,19 @@ class Screen:
             error=''
             while True:
                 height,columns=self.window.getmaxyx()
-                count=max(1,min(len(choices),height-10-len(wrap(label,columns-5))))
+                count=max(1,min(len(choices),height-12-len(wrap(label,columns-5))))
                 start=max(0,min(index-count//2,len(choices)-count))
                 rows=[]
                 for key,name in choices[start:start+count]:
                     number=start+len(rows)
                     prefix=('[x] ' if key in selected else '[ ] ') if multiple else '  '
-                    rows.append((('› ' if number==index else '  ')+prefix+name,'section' if number==index else 'text',number==index))
+                    marker=('› ' if number==index else '  ')+prefix
+                    text=marker+elide(clean(name),max(1,columns-4-width(marker)))
+                    rows.append((text,'section' if number==index else 'text',number==index))
+                detail=wrap('Выбрано: '+clean(choices[index][1]),columns-5)
+                if any(width(name)>columns-10 for _,name in choices):
+                    # A scrollable copy exposes the complete selected name, including its suffix.
+                    self.lines=base_lines+[(line,'example') for line in detail]
                 footer='↑↓ выбор · '+('Пробел отметка · ' if multiple else '')+'Enter далее · Esc назад'
                 choice_label=f'{label} · {index+1}/{len(choices)}' if len(choices)>count else label
                 ready=self.draw(error or choice_label,footer,rows)
@@ -210,19 +245,36 @@ class Screen:
                     if not multiple: return choices[index][0]
                     if selected or allow_empty: return [key for key,_ in choices if key in selected]
                     error='Отметьте хотя бы одно дополнение пробелом.'
-        return self.remember(('multi' if multiple else 'select',label,tuple(sorted(k for k,_ in choices))),default,read)
+        base_lines=list(self.lines)
+        try: return self.remember(('multi' if multiple else 'select',label,tuple(sorted(k for k,_ in choices))),default,read)
+        finally: self.lines=base_lines
 
     def view(self,title: str,text: str=''):
-        if text: self.page(title); self.lines=[(line,'text') for line in text.splitlines()]
+        if text:
+            self.page(title)
+            self.lines=[]
+            for line in self.redact(clean(text)).splitlines():
+                tone='error' if re.search(r'(^E:|\b(error|failed|failure|fatal|panic|ошибка)\b)',line,re.I) else (
+                     'warning' if re.search(r'\b(warn(?:ing)?|timeout|предупреждение)\b',line,re.I) else (
+                     'section' if line.startswith('[ЭТАП]') else (
+                     'success' if re.search(r': (работает|выполнено)$',line) else 'text')))
+                self.lines.append((line,tone))
         self.offset=0
         while True:
-            self.draw('','↑↓ / PgUp / PgDn — прокрутка   Enter / Esc — в меню')
+            footer='↑↓ / PgUp/PgDn текст · Home/End начало/конец\nEnter / Esc — назад' if len(self.lines)>self.page_size else 'Enter / Esc — назад'
+            self.draw('',footer)
             key=self.window.get_wch()
             if key in ('\x1b','\n','\r',self.curses.KEY_ENTER): return
             if key=='\x03': raise KeyboardInterrupt
             if key in (self.curses.KEY_DOWN,self.curses.KEY_NPAGE): self.offset+=1 if key==self.curses.KEY_DOWN else self.page_size
             if key in (self.curses.KEY_UP,self.curses.KEY_PPAGE): self.offset=max(0,self.offset-(1 if key==self.curses.KEY_UP else self.page_size))
             if key==self.curses.KEY_HOME: self.offset=0
+            if key==self.curses.KEY_END: self.offset=sys.maxsize
+
+    def redact(self,text: str) -> str:
+        for value in self.secrets | set(self.environment.values()):
+            if value: text=text.replace(value,'[скрыто]')
+        return re.sub(r'(?i)(authorization:\s*(?:bearer\s+)?|SECRET_KEY=|api[_-]?token=)\S+',r'\1[скрыто]',text)
 
     def begin_apply(self):
         self.applying=True; self.answers.clear(); self.replay_until=0
@@ -236,7 +288,7 @@ class Screen:
         node.command_log=self.command_log
 
     def command_log(self,text: str):
-        if self.log: self.log.write(text+'\n'); self.log.flush()
+        if self.log: self.log.write(self.redact(clean(text))+'\n'); self.log.flush()
 
     def finish(self):
         import node
@@ -258,23 +310,56 @@ class Screen:
 
     def diagnostics(self):
         choices=[('status','Состояние служб'),('ygg','Журнал Yggdrasil'),('node','Журнал Remnanode'),
-                 ('installer','Журнал последнего применения'),('back','Назад')]
+                 ('cert','Журнал сертификата Hysteria2'),('installer','Журнал последнего применения'),
+                 ('bootstrap','Журнал загрузчика'),('back','Назад')]
         while True:
             self.page('Диагностика · только просмотр'); self.position=0; self.answers=[]
             selected=self.select('Что показать?',choices,'status')
             if selected=='back': return
-            if selected=='installer':
-                path=LOG_DIR/'installer.log'
-                text=path.read_text() if path.exists() else 'Журнала пока нет. Он создаётся после подтверждения применения.'
-                text='\n'.join(text.splitlines()[-300:])
+            if selected in ('installer','bootstrap'):
+                path=LOG_DIR/('installer.log' if selected=='installer' else 'bootstrap.log')
+                if path.exists():
+                    with path.open(errors='replace') as log: text=''.join(deque(log,300))
+                else:
+                    text=('Журнала пока нет. Он создаётся после подтверждения применения.' if selected=='installer' else
+                          'Журнала нет: загрузчику не потребовалась установка зависимостей.')
+            elif selected=='status':
+                text=self.service_report()
             else:
-                command={'status':['systemctl','--no-pager','--plain','status','yggdrasil','remna-ygg-access','remna-ygg-ssh','remna-hy2-certs.timer'],
-                         'ygg':['journalctl','-u','yggdrasil','-n','100','--no-pager'],
+                command={'ygg':['journalctl','-u','yggdrasil','-u','remna-ygg-network','-u','remna-ygg-access','-u','remna-ygg-ssh','-n','100','--no-pager'],
+                         'cert':['journalctl','-u','remna-hy2-certs','-n','100','--no-pager'],
                          'node':['docker','logs','--tail','100','remnanode']}[selected]
                 self.say('Загружаю журнал…','muted')
-                output=subprocess.run(command,capture_output=True,text=True,timeout=30)
-                text=output.stdout+output.stderr
-            self.view('Диагностика',text or 'Нет записей.')
+                output=subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,errors='replace',timeout=30)
+                text=output.stdout
+                if output.returncode: text=f'Команда завершилась с кодом {output.returncode}.\n'+text
+            self.view(dict(choices)[selected],text or 'Нет записей.')
+
+    def service_report(self) -> str:
+        """Read systemd's property boundary, including optional absent units."""
+        units={'yggdrasil.service':'Yggdrasil','remna-ygg-network.service':'Маршруты Yggdrasil',
+               'remna-ygg-access.service':'Доступ к VPN','remna-ygg-ssh.service':'Доступ к SSH',
+               'remna-hy2-certs.service':'Обновление сертификата',
+               'remna-hy2-certs.timer':'Таймер сертификата'}
+        result=subprocess.run(['systemctl','show','--no-pager','--property=Id,LoadState,ActiveState,SubState',*units],
+                              stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,errors='replace',timeout=30)
+        states={}
+        for block in result.stdout.strip().split('\n\n'):
+            values=dict(line.split('=',1) for line in block.splitlines() if '=' in line)
+            if 'Id' in values: states[values['Id']]=values
+        lines=['СЛУЖБЫ НА ЭТОЙ VPS','Снимок на момент открытия. Это не проверка VPN в клиенте.','']
+        for unit,name in units.items():
+            values=states.get(unit,{})
+            if values.get('LoadState')=='not-found': status='не настроено'
+            elif values.get('ActiveState')=='active':
+                status='выполнено' if values.get('SubState')=='exited' else 'работает'
+            elif values.get('ActiveState')=='failed': status='FAILED — ошибка службы'
+            else: status=values.get('ActiveState','статус недоступен')
+            lines.append(name+': '+status)
+        lines+=['','Не настроено — допустимо для невыбранных протоколов и SSH.',
+                'FAILED — откройте журнал соответствующей службы.']
+        if not states: lines+=['','Ошибка чтения systemd: '+result.stdout.strip()]
+        return '\n'.join(lines)
 
 
 def launch(callback,result,version: str,argv: list[str]) -> bool:
@@ -331,6 +416,6 @@ def launch(callback,result,version: str,argv: list[str]) -> bool:
         if app.applying: app.command_log('Прервано пользователем: часть шагов могла завершиться.')
         return True
     finally:
-        app.finish(); app.environment.clear(); ui.screen=None
+        app.finish(); app.environment.clear(); app.secrets.clear(); ui.screen=None
         window.keypad(False); curses.nocbreak(); curses.echo(); curses.endwin()
         if interrupted: print('Применение прервано. Часть шагов могла завершиться; журнал: '+str(LOG_DIR/'installer.log'))

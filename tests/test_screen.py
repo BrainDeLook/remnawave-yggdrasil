@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from screen import Answer,Back,Screen,available,clip,width,wrap
+from screen import Answer,Back,Screen,available,clean,clip,width,wrap
 import node
 import ui
 
@@ -37,6 +37,60 @@ def terminal(window):
 
 
 class ScreenTests(unittest.TestCase):
+    def test_tiny_resize_does_not_block_selection(self):
+        window=Window(size=(18,4)); app=terminal(window)
+        def resize():
+            window.size=(24,80)
+            return '\n'
+        window.get_wch=resize
+        self.assertEqual(app.select('中文 · Нода',[('a','Первая нода')],'a'),'a')
+
+    def test_long_names_keep_identifying_suffix_and_full_detail(self):
+        window=Window(['\n'],size=(18,54)); app=terminal(window)
+        name='Одинаковое длинное начало '*4+'ВТОРАЯ НОДА'
+        app.select('Нода',[('b',name)],'b')
+        self.assertTrue(any('ВТОРАЯ НОДА' in line and '…' in line for line in window.written))
+        self.assertEqual(app.lines,[])
+
+    def test_logs_preserve_indentation_color_errors_and_reach_end(self):
+        window=Window(size=(18,54)); app=terminal(window)
+        window.keys=iter([app.curses.KEY_END,'\n'])
+        tones=[]
+        original=app.line
+        def line(row,text,tone='text',reverse=False):
+            tones.append((text,tone)); original(row,text,tone,reverse)
+        app.line=line
+        app.view('Журнал','{\n    "data": true\n}\nWARNING retry\nERROR failed\n'+'x'*500+'\nLAST_LINE')
+        self.assertIn(('    "data": true','text'),tones)
+        self.assertIn(('WARNING retry','warning'),tones)
+        self.assertIn(('ERROR failed','error'),tones)
+        self.assertIn('LAST_LINE',window.written)
+
+    def test_log_redacts_known_secrets_and_terminal_escape_sequences(self):
+        window=Window(['\n']); app=terminal(window); app.secrets.add('SESSION_SECRET')
+        app.view('Журнал','\x1b[31mERROR\x1b[0m SESSION_SECRET\nSECRET_KEY=OTHER\n'+
+                 '\x1b]8;;https://untrusted.example\x1b\\label\x1b]8;;\x1b\\')
+        rendered='\n'.join(window.written)
+        self.assertNotIn('SESSION_SECRET',rendered)
+        self.assertNotIn('OTHER',rendered)
+        self.assertNotIn('untrusted.example',rendered)
+        self.assertIn('label',rendered)
+
+    def test_optional_missing_service_is_distinct_from_failure(self):
+        app=terminal(Window())
+        result=subprocess.CompletedProcess([],0,
+            'Id=remna-ygg-ssh.service\nLoadState=not-found\nActiveState=inactive\n\n'+
+            'Id=yggdrasil.service\nLoadState=loaded\nActiveState=failed\nSubState=failed\n')
+        with patch('screen.subprocess.run',return_value=result): report=app.service_report()
+        self.assertIn('Доступ к SSH: не настроено',report)
+        self.assertIn('Yggdrasil: FAILED',report)
+
+    def test_multiselect_help_fits_small_terminal_without_losing_back_key(self):
+        window=Window(['\n'],size=(18,54)); app=terminal(window)
+        app.select('Протоколы',[(str(n),'Протокол '+str(n)) for n in range(20)],[],True)
+        footer=' '.join(window.cells.values())
+        self.assertIn('Пробел',footer); self.assertIn('Esc',footer)
+
     def test_menu_and_input_stay_next_to_explanation_in_tall_windows(self):
         for height in (24,40,60):
             window=Window(['\n'],size=(height,100)); app=terminal(window)
