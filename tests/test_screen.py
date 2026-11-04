@@ -38,18 +38,12 @@ def terminal(window):
 
 
 class ScreenTests(unittest.TestCase):
-    def test_colour_compatibility_and_explicit_basic_mode(self):
-        with patch('sys.stdin.isatty',return_value=True),patch('sys.stdout.isatty',return_value=True):
-            for term,mode,expected in [('xterm','auto','xterm-256color'),
-                    ('xterm-color','auto','xterm-256color'),('linux','auto','linux'),
-                    ('vt100','auto','vt100'),('xterm','basic','xterm'),
-                    ('xterm-256color','basic','xterm-256color')]:
-                with self.subTest(term=term,mode=mode),patch.dict(os.environ,TERM=term,REMNAYGG_COLORS=mode):
-                    os.environ.pop('NO_COLOR',None)
-                    self.assertEqual(terminal_profile(),expected)
-                    self.assertEqual(os.environ['TERM'],term)
-            with patch.dict(os.environ,TERM='xterm',NO_COLOR='1'):
-                self.assertEqual(terminal_profile(),'xterm')
+    def test_installer_uses_one_extended_colour_profile(self):
+        for term,expected in [('xterm','xterm-256color'),('linux','xterm-256color'),
+                              ('screen','screen-256color'),('tmux','tmux-256color')]:
+            with self.subTest(term=term),patch.dict(os.environ,TERM=term):
+                self.assertEqual(terminal_profile(),expected)
+                self.assertEqual(os.environ['TERM'],term)
 
     def test_tiny_resize_does_not_block_selection(self):
         window=Window(size=(18,4)); app=terminal(window)
@@ -250,8 +244,8 @@ class PtyTests(unittest.TestCase):
         import pty
         import termios
         import json
-        for term,mode,expected in [('xterm','auto',6),('xterm','basic',0),('linux','auto',0)]:
-            with self.subTest(term=term,mode=mode),tempfile.TemporaryDirectory() as directory:
+        for term in ('xterm','xterm-256color'):
+            with self.subTest(term=term),tempfile.TemporaryDirectory() as directory:
                 master,slave=pty.openpty(); before=termios.tcgetattr(slave)
                 path=Path(directory)/'profile.json'
                 code=('import json,os,curses,sys; from pathlib import Path; '
@@ -260,11 +254,11 @@ class PtyTests(unittest.TestCase):
                       'app=curses.wrapper(lambda window:Screen(window,curses,"test")); '
                       'Path(sys.argv[1]).write_text(json.dumps(sum(key.startswith("banner") for key in app.palette)))')
                 process=subprocess.Popen([sys.executable,'-c',code,str(path)],stdin=slave,stdout=slave,stderr=slave,
-                    env={k:v for k,v in dict(os.environ,TERM=term,REMNAYGG_COLORS=mode).items()
+                    env={k:v for k,v in dict(os.environ,TERM=term).items()
                          if k not in ('NO_COLOR','COLORTERM','TERM_PROGRAM')})
                 try:
                     self.assertEqual(process.wait(timeout=5),0)
-                    self.assertEqual(json.loads(path.read_text()),expected)
+                    self.assertEqual(json.loads(path.read_text()),6)
                     self.assertEqual(termios.tcgetattr(slave),before)
                 finally:
                     if process.poll() is None: process.kill(); process.wait(timeout=5)

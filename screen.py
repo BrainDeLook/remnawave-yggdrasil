@@ -83,25 +83,11 @@ def content_start(height: int,columns: int) -> int:
 
 
 def terminal_profile() -> str:
-    """Use modern xterm compatibility; preserve explicit limited terminal types.
-
-    Plain xterm does not identify its actual colour depth. In particular Bitvise
-    supports 256 colours but can ignore all palette/capability queries. Auto is
-    deliberately a compatibility heuristic, not a positive capability probe.
-    """
+    """Use the installer's single 256-colour terminal profile."""
     term=os.environ.get('TERM','')
-    mode=os.environ.get('REMNAYGG_COLORS','auto').lower()
-    if mode not in ('auto','basic','256'):
-        from api import Error
-        raise Error('REMNAYGG_COLORS: используйте auto, basic или 256')
-    if ('NO_COLOR' in os.environ or not sys.stdin.isatty() or not sys.stdout.isatty()
-            or term in ('','dumb') or mode=='basic'):
-        return term
-    if mode=='256':
-        if term.startswith('screen'): return 'screen-256color'
-        if term.startswith('tmux'): return 'tmux-256color'
-        return 'xterm-256color'
-    return 'xterm-256color' if term in ('xterm','xterm-color') else term
+    if term.startswith('screen'): return 'screen-256color'
+    if term.startswith('tmux'): return 'tmux-256color'
+    return 'xterm-256color'
 
 
 class Screen:
@@ -113,14 +99,13 @@ class Screen:
         self.palette={}
         if curses.has_colors() and 'NO_COLOR' not in os.environ:
             curses.start_color(); curses.use_default_colors()
-            colors=min(curses.COLORS,16) if os.environ.get('REMNAYGG_COLORS','auto').lower()=='basic' else curses.COLORS
             for index,(tone,color) in enumerate([('text',7),('muted',8),('section',14),('question',11),
                  ('value',10),('success',10),('example',12),('warning',11),('error',9)],1):
-                if colors<16: color=7 if tone=='muted' else color%8
+                if curses.COLORS<16: color=7 if tone=='muted' else color%8
                 curses.init_pair(index,color,-1); self.palette[tone]=curses.color_pair(index)
             # Fixed xterm-256 colours: blue -> cyan -> ice blue, one step per row.
             # Do not alter the terminal's global palette or depend on theme-defined blue.
-            if colors>=256:
+            if curses.COLORS>=256:
                 for row,color in enumerate((39,45,81,117,153,195),1):
                     curses.init_pair(9+row,color,-1)
                     self.palette['banner'+str(row)]=curses.color_pair(9+row)
@@ -428,9 +413,6 @@ def launch(callback,result,version: str,argv: list[str]) -> bool:
     selected_term=terminal_profile()
     window=None
     try:
-        # A failed optional 256-colour terminfo lookup falls back to the original.
-        try: curses.setupterm(term=selected_term)
-        except curses.error: selected_term=original_term
         os.environ['TERM']=selected_term
         window=curses.initscr(); curses.noecho(); curses.cbreak(); window.keypad(True)
         curses.set_escdelay(40); curses.curs_set(0)
