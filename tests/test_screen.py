@@ -20,7 +20,8 @@ class Window:
     def getmaxyx(self): return self.size
     def erase(self): pass
     def refresh(self): pass
-    def move(self,*args): pass
+    def move(self,row,col):
+        assert 0<=row<self.size[0] and 0<=col<self.size[1]
     def get_wch(self): return next(self.keys)
     def addstr(self,row,col,text,*style):
         assert 0<=row<self.size[0] and col+width(text)<self.size[1]
@@ -91,6 +92,11 @@ class ScreenTests(unittest.TestCase):
         window.get_wch=read
         self.assertEqual(app.prompt('Имя'),'я')
         self.assertTrue(any('Увеличьте окно' in s for s in window.written))
+
+    def test_resize_during_redraw_does_not_leave_cursor_outside_window(self):
+        window=Window(['я','\n']); app=terminal(window)
+        window.refresh=lambda:setattr(window,'size',(18,60))
+        self.assertEqual(app.prompt('Имя'),'я')
 
     def test_docker_secrets_are_excluded_from_command_log(self):
         logged=[]

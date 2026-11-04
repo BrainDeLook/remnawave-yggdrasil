@@ -141,7 +141,10 @@ class Screen:
                         display=value[start:]
                     ready=self.draw(label,footer,[(height-3,'> '+display,'value',False)])
                     if ready:
-                        self.window.move(height-3,4 if secret else 4+width(value[start:cursor]))
+                        # refresh() can process SIGWINCH after the layout was calculated.
+                        current_height,current_columns=self.window.getmaxyx()
+                        column=4 if secret else 4+width(value[start:cursor])
+                        self.window.move(max(0,current_height-3),min(column,max(0,current_columns-2)))
                         self.window.refresh()
                     key=self.window.get_wch()
                     if key=='\x03': raise KeyboardInterrupt
