@@ -152,7 +152,7 @@ class Screen:
                     if key=='\x03': raise KeyboardInterrupt
                     if key=='\x1b': raise Back(self.position-2)
                     if key in ('\n','\r',self.curses.KEY_ENTER):
-                        if ready: return value or previous
+                        if ready: return value.strip() or previous
                         continue
                     if key in ('\b','\x7f',self.curses.KEY_BACKSPACE) and cursor:
                         value=value[:cursor-1]+value[cursor:]; cursor-=1
