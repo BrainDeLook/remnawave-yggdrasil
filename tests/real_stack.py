@@ -19,6 +19,39 @@ from probe import export, verify
 ROOT=Path(__file__).resolve().parents[1]
 
 
+def terminal_wizard(command: list[str],confirm: bool,secret: str):
+    """Drive the actual installer in a real terminal, without exposing its transcript."""
+    import fcntl
+    import pty
+    import select
+    import struct
+    import termios
+    master,slave=pty.openpty()
+    fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',32,100,0,0))
+    before=termios.tcgetattr(slave)
+    process=subprocess.Popen(command,stdin=slave,stdout=slave,stderr=slave,
+                             env=dict(os.environ,TERM='xterm-256color',LANG='C.UTF-8'))
+    output=bytearray(); offset=0
+    stages=[('Применить показанный план?',b'\x1bOA\n' if confirm else b'\n'),
+            ('УСТАНОВКА ЗАВЕРШЕНА' if confirm else 'Отменено.',b'\x1b'),
+            ('Главное меню',b'\x1b')]
+    try:
+        for text,keys in stages:
+            deadline=time.monotonic()+180
+            while output.find(text.encode(),offset)<0:
+                if time.monotonic()>=deadline or process.poll() is not None:
+                    raise AssertionError('Real installer terminal stopped before: '+text)
+                if select.select([master],[],[],.1)[0]: output.extend(os.read(master,65536))
+            offset=output.find(text.encode(),offset)+len(text.encode())
+            os.write(master,keys)
+        assert process.wait(timeout=20)==0
+        assert termios.tcgetattr(slave)==before,'Installer did not restore terminal settings'
+        assert secret.encode() not in output,'API token leaked to terminal'
+    finally:
+        if process.poll() is None: process.kill(); process.wait(timeout=10)
+        os.close(master); os.close(slave)
+
+
 def wait(action,seconds=180):
     deadline=time.monotonic()+seconds
     last='not ready'
@@ -409,6 +442,18 @@ print('PASS subscription mode: unlisted Ygg source allowed, legacy/SSH/other des
         assert run('systemctl','is-active','remna-hy2-certs.timer',check=False).strip()!='active'
         assert api.request('GET','/config-profiles/'+profile['uuid'])['config']==current['config']
         print('PASS reused Hysteria2: configured certificate/manager preserved, no unnecessary container restart',flush=True)
+        # Real manager in PTY: default No must not mutate anything; explicit Yes reuses the same core.
+        interactive=[argument for argument in subscription_args if argument!='--yes']
+        state_file=Path('/etc/remnawave-yggdrasil/multi-state.json')
+        saved_state=state_file.read_bytes()
+        terminal_wizard(interactive,False,api.token)
+        assert state_file.read_bytes()==saved_state
+        assert api.request('GET','/config-profiles/'+profile['uuid'])['config']==current['config']
+        terminal_wizard(interactive,True,api.token)
+        assert json.loads(state_file.read_text())['access_mode']=='subscription'
+        assert api.token not in Path('/var/log/remnawave-yggdrasil/installer.log').read_text()
+        verify(client)
+        print('PASS actual full-screen installer: default No, explicit Yes, private token/log and terminal restoration',flush=True)
         verify_neighbours()
         run('ip','link','del','ry-host'); run('ip','netns','del','remna-ygg-ci')
     finally:
