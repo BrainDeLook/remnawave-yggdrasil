@@ -85,6 +85,25 @@ class ScreenTests(unittest.TestCase):
         self.assertIn('Доступ к SSH: не настроено',report)
         self.assertIn('Yggdrasil: FAILED',report)
 
+    def test_idle_certificate_job_with_active_timer_is_not_a_failure(self):
+        app=terminal(Window())
+        result=subprocess.CompletedProcess([],0,
+            'Id=remna-hy2-certs.service\nLoadState=loaded\nActiveState=inactive\nResult=success\n\n'+
+            'Id=remna-hy2-certs.timer\nLoadState=loaded\nActiveState=active\nSubState=waiting\nResult=success\n')
+        with patch('screen.subprocess.run',return_value=result): report=app.service_report()
+        self.assertIn('Обновление сертификата: ожидает запуска по таймеру',report)
+        self.assertIn('Таймер сертификата: запуск по расписанию включён',report)
+        self.assertNotIn('FAILED',report)
+
+    def test_failed_certificate_job_is_not_hidden_by_active_timer(self):
+        app=terminal(Window())
+        result=subprocess.CompletedProcess([],0,
+            'Id=remna-hy2-certs.service\nLoadState=loaded\nActiveState=inactive\nResult=exit-code\n\n'+
+            'Id=remna-hy2-certs.timer\nLoadState=loaded\nActiveState=active\n')
+        with patch('screen.subprocess.run',return_value=result): report=app.service_report()
+        self.assertIn('Обновление сертификата: FAILED',report)
+        self.assertNotIn('ожидает запуска',report)
+
     def test_multiselect_help_fits_small_terminal_without_losing_back_key(self):
         window=Window(['\n'],size=(18,54)); app=terminal(window)
         app.select('Протоколы',[(str(n),'Протокол '+str(n)) for n in range(20)],[],True)

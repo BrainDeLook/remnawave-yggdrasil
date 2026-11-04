@@ -282,7 +282,7 @@ class Screen:
                 tone='error' if re.search(r'(^E:|\b(error|failed|failure|fatal|panic|ошибка)\b)',line,re.I) else (
                      'warning' if re.search(r'\b(warn(?:ing)?|timeout|предупреждение)\b',line,re.I) else (
                      'section' if line.startswith('[ЭТАП]') else (
-                     'success' if re.search(r': (работает|выполнено)$',line) else 'text')))
+                     'success' if re.search(r': (работает|выполнено|запуск по расписанию включён)$',line) else 'text')))
                 self.lines.append((line,tone))
         self.offset=0
         while True:
@@ -366,23 +366,31 @@ class Screen:
                'remna-ygg-access.service':'Доступ к VPN','remna-ygg-ssh.service':'Доступ к SSH',
                'remna-hy2-certs.service':'Обновление сертификата',
                'remna-hy2-certs.timer':'Таймер сертификата'}
-        result=subprocess.run(['systemctl','show','--no-pager','--property=Id,LoadState,ActiveState,SubState',*units],
+        result=subprocess.run(['systemctl','show','--no-pager','--property=Id,LoadState,ActiveState,SubState,Result',*units],
                               stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,errors='replace',timeout=30)
         states={}
         for block in result.stdout.strip().split('\n\n'):
             values=dict(line.split('=',1) for line in block.splitlines() if '=' in line)
             if 'Id' in values: states[values['Id']]=values
         lines=['СЛУЖБЫ НА ЭТОЙ VPS','Снимок на момент открытия. Это не проверка VPN в клиенте.','']
+        failed=[]
         for unit,name in units.items():
             values=states.get(unit,{})
             if values.get('LoadState')=='not-found': status='не настроено'
+            elif values.get('ActiveState')=='failed' or values.get('Result','success') not in ('','success'):
+                status='FAILED — ошибка службы'; failed.append(name)
             elif values.get('ActiveState')=='active':
-                status='выполнено' if values.get('SubState')=='exited' else 'работает'
-            elif values.get('ActiveState')=='failed': status='FAILED — ошибка службы'
-            else: status=values.get('ActiveState','статус недоступен')
+                status='запуск по расписанию включён' if unit.endswith('.timer') else (
+                       'выполнено' if values.get('SubState')=='exited' else 'работает')
+            elif (unit=='remna-hy2-certs.service' and values.get('ActiveState')=='inactive'
+                  and states.get('remna-hy2-certs.timer',{}).get('ActiveState')=='active'):
+                status='ожидает запуска по таймеру'
+            else:
+                status={'inactive':'остановлена','activating':'запускается','deactivating':'останавливается',
+                        'reloading':'перезагружается'}.get(values.get('ActiveState'),'статус недоступен')
             lines.append(name+': '+status)
-        lines+=['','Не настроено — допустимо для невыбранных протоколов и SSH.',
-                'FAILED — откройте журнал соответствующей службы.']
+        lines+=['','Не настроено — допустимо для невыбранных протоколов и SSH.']
+        if failed: lines+=['','Откройте журнал служб со сбоем: '+', '.join(failed)+'.']
         if not states: lines+=['','Ошибка чтения systemd: '+result.stdout.strip()]
         return '\n'.join(lines)
 
