@@ -36,6 +36,15 @@ def terminal(window):
 
 
 class ScreenTests(unittest.TestCase):
+    def test_eight_color_terminals_keep_help_text_visible(self):
+        colors=[]
+        curses=SimpleNamespace(has_colors=lambda:True,start_color=lambda:None,use_default_colors=lambda:None,
+            COLORS=8,init_pair=lambda index,color,background:colors.append(color),color_pair=lambda index:index)
+        with patch.dict(os.environ,{},clear=False):
+            os.environ.pop('NO_COLOR',None)
+            Screen(Window(),curses,'test')
+        self.assertTrue(all(1<=color<=7 for color in colors))
+
     def test_plain_and_automated_modes_never_open_a_terminal(self):
         with patch('sys.stdin.isatty',return_value=True),patch('sys.stdout.isatty',return_value=True),patch.dict(os.environ,TERM='xterm'):
             self.assertTrue(available([]))

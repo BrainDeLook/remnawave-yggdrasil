@@ -61,7 +61,7 @@ class Screen:
             curses.start_color(); curses.use_default_colors()
             for index,(tone,color) in enumerate([('text',7),('muted',8),('section',14),('question',11),
                  ('value',10),('success',10),('example',12),('warning',11),('error',9)],1):
-                if curses.COLORS<16: color%=8
+                if curses.COLORS<16: color=7 if tone=='muted' else color%8
                 curses.init_pair(index,color,-1); self.palette[tone]=curses.color_pair(index)
 
     def line(self,row: int,text: str,tone: str='text',reverse: bool=False):
