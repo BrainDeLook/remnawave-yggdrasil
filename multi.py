@@ -20,7 +20,7 @@ import node as local
 import certificates
 import provision
 
-VERSION='0.3.6'
+VERSION='0.3.7'
 FILES=('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py','ui.py','screen.py')
 
 
@@ -88,13 +88,12 @@ def result(*, after_install=False):
 
 
 def main(argv=None):
-    parser=argparse.ArgumentParser(description='Remnawave: дополнительные протоколы в существующем профиле и сквадах')
+    parser=argparse.ArgumentParser(description='Remnawave: дополнительные протоколы в существующем профиле')
     parser.add_argument('--version',action='version',version=VERSION)
     parser.add_argument('--plain',action='store_true',help='Обычный текстовый мастер вместо экранного меню')
     parser.add_argument('--panel'); parser.add_argument('--token-file',type=Path); parser.add_argument('--access-file',type=Path)
     parser.add_argument('--node'); parser.add_argument('--source-host'); parser.add_argument('--name')
     parser.add_argument('--protocol',action='append',choices=LABELS,default=[])
-    parser.add_argument('--squad',action='append',default=[],help='UUID сквада для выбранных протоколов; повторяемый')
     parser.add_argument('--allow-ip',action='append',default=[])
     parser.add_argument('--access-mode',choices=('subscription','restricted'),help='Yggdrasil: по учётной записи или дополнительно по списку IP')
     parser.add_argument('--ssh-allow-ip',action='append',default=[])
@@ -117,7 +116,7 @@ def main(argv=None):
     if sys.stdin.isatty() and not ui.fullscreen(): termios.tcflush(sys.stdin.fileno(),termios.TCIFLUSH)
     frame('RemnaYgg · дополнительные протоколы · '+VERSION,[
         ('Мастер для VPS с уже работающей нодой Remnawave.','text'),
-        ('Вы выбираете протоколы и группы пользователей. Скрипт готовит VPS,','text'),
+        ('Вы выбираете дополнительные протоколы. Скрипт готовит VPS,','text'),
         ('добавляет inbound и Host через API, затем выдаёт результат.','text'),
         ('До подтверждения плана рабочие настройки не применяются.','muted')])
     say('  Цвета: разделы — бирюзовые; вопросы — жёлтые; выбранное — зелёное.','muted')
@@ -137,7 +136,7 @@ def main(argv=None):
         token=args.token_file.read_text().strip()
     if not token and not args.yes:
         ui.page('1 · API-токен')
-        say('  Где взять токен: «Настройки Remnawave» → «Токены API».\n  Создайте отдельный временный токен с чтением и изменением профилей,\n  нод, Host и внутренних сквадов. Подойдёт временный полный доступ.')
+        say('  Где взять токен: «Настройки Remnawave» → «Токены API».\n  Создайте отдельный временный токен с чтением и изменением профилей,\n  нод и Host. Подойдёт временный полный доступ.')
         say('  Токен используется только в этом запуске и не сохраняется.','muted')
         token=secret_prompt('Вставьте API-токен панели')
     api=API(panel,token)
@@ -194,28 +193,12 @@ def main(argv=None):
         say('  Общее название без протокола. Например: 🇳🇱 Нидерланды.\n  Мастер добавит короткое окончание Histeria, GRPC, XHTTP или Ygg.','example')
         name=prompt('Общее название сервера',name)
     if not 1<=len(name)<=60 or any(c in name for c in '\r\n'): raise Error('Название должно содержать от 1 до 60 символов')
-    all_squads=provision.squads(api)
-    known={s['uuid'] for s in all_squads}
-    if any(v not in known for v in args.squad): raise Error('Не найден указанный UUID сквада')
-    grants={p:list(args.squad) for p in protocols}
-    section(4,'Кому выдать доступ')
-    say('  Внутренний сквад — группа VPN-пользователей в Remnawave.\n  Для каждого дополнения выберите группы, которым оно нужно.\n  Мастер добавит им доступ к inbound и ограничит ими показ нового Host.')
-    say('  Enter без выбора → новый Host будет создан выключенным.\n  Позже назначьте ему группы в панели и включите Host.','warning')
-    say('  У уже существующих Host сохраняются ограничения, заданные в панели.\n  Выбор ниже добавляет доступ к inbound, но не меняет ограничения такого Host.','muted')
-    for p in protocols:
-        if args.yes or args.squad: continue
-        if ui.fullscreen():
-            ui.page('4 · Доступ · '+HOST_SUFFIXES[p])
-            say('  Отметьте группы VPN-пользователей для этого подключения.\n  Без выбора новый Host будет выключен: доступ можно настроить в панели.')
-        say('\n  '+LABELS[p],'section')
-        grants[p]=ui.multi_select('Каким сквадам выдать доступ?',
-                                 [(s['uuid'],s['name']) for s in all_squads],[])
     # Omitting Yggdrasil means leave it alone, including the saved SSH/access state.
     allowed=old.get('allowed',[]); ssh_allowed=old.get('ssh_allowed',[]); ssh_enabled=old.get('ssh',False)
     access_mode=old.get('access_mode','restricted' if allowed else 'subscription')
     restricted_allowed=old.get('restricted_allowed',allowed)
     if 'ygg' in protocols:
-        section(5,'Устройства Yggdrasil и доступ по SSH')
+        section(4,'Устройства Yggdrasil и доступ по SSH')
         say('  VPN проверяет учётную запись Remnawave и доступ к inbound.\n  Выберите, нужно ли дополнительно ограничивать IPv6 устройств.')
         if not ui.fullscreen():
             option(1,'По подписке','любой адрес Yggdrasil; IP клиентов вводить не нужно')
@@ -249,11 +232,11 @@ def main(argv=None):
             restricted_allowed=allowed
         ssh_enabled=args.ssh or (old.get('ssh',False) and not args.no_ssh)
         if not args.yes and not args.ssh and not args.no_ssh:
-            ui.page('5 · SSH через Yggdrasil')
+            ui.page('4 · SSH через Yggdrasil')
             say('\n  SSH позволяет управлять VPS через Yggdrasil. Для VPN он не обязателен.')
             ssh_enabled=confirm('Разрешить также SSH через Yggdrasil?',ssh_enabled)
         if ssh_enabled:
-            ui.page('5 · Доступ к SSH')
+            ui.page('4 · Доступ к SSH')
             say('\n  Кому разрешить управление VPS по SSH','section')
             say('  Это отдельный список. Например, другу можно выдать VPN, а SSH — только\n  себе. Для входа всё равно потребуется существующий ключ или пароль VPS.\n  Enter оставит предложенные ниже адреса. Можно ввести свой список.')
             say('  Пример: IPv6 роутера 200:1111:2222:3333:4444:5555:6666:7777\n  или подсеть вашей LAN 300:1111:2222:3333::/64.\n  OpenWrt → Сеть → Интерфейсы → Yggdrasil: IPv6 без /7, IPv6-PD с /64.','example')
@@ -305,7 +288,7 @@ def main(argv=None):
             if docker['Config'].get('User') not in ('','0','root','0:0'):
                 raise Error('Новый Hysteria2: эта версия ожидает root внутри контейнера для чтения ключа 600')
             if not cert:
-                section(6,'Сертификат для Hysteria2')
+                section(5,'Сертификат для Hysteria2')
                 say('  Проверяю существующие сертификаты Certbot. Мастер выберет тот,\n  который подходит домену Host и ещё действует.')
                 field('Домен Host',source.address)
                 detected=certificates.discover(source.address)
@@ -322,22 +305,20 @@ def main(argv=None):
             key=key or cert.parent/'privkey.pem'
             pair=certificates.validate(cert,key,source.address)
         field('Сертификат проверен',str(pair.cert))
-    ui.page('7 · План применения')
+    ui.page('6 · План применения')
     frame('ПЛАН ПРИМЕНЕНИЯ',[(selected.name+' · '+selected.address,'value'),('Профиль: '+profile['name'],'text')])
     for p,tag in mapping.items():
-        names=[s['name'] for s in all_squads if s['uuid'] in grants[p]]
         say('\n  '+LABELS[p],'section')
         field('Inbound',tag)
         field('Название нового Host',name+' '+HOST_SUFFIXES[p])
         field('Порт',str(raw_by_tag[tag]['port']))
-        field('Добавить доступ сквадам',', '.join(names) or 'не добавлять')
-        if not names: say('  Новый Host будет выключен; существующий Host сохранит настройки.','warning')
     if 'ygg' in protocols:
         field('Доступ к VPN','по подписке, без списка IP' if access_mode=='subscription' else 'по подписке и списку IP')
         if allowed: field('Устройства для VPN',' '.join(allowed))
         field('SSH через Yggdrasil','включён' if ssh_enabled else 'выключен')
         if ssh_enabled: field('Устройства для SSH',' '.join(ssh_allowed))
-    say('\n  Применение профиля и прав сквадов может кратко перезагрузить Xray.','warning')
+    say('\n  После установки разрешите нужные inbound во внутренних сквадах панели.','text')
+    say('  Применение профиля может кратко перезагрузить Xray.','warning')
     if shared_nodes:
         frame('Общий профиль — возможен перезапуск других нод',[
             ('Этот профиль также используют: '+', '.join(shared_nodes),'warning'),
@@ -389,10 +370,10 @@ def main(argv=None):
         elif retire_cert_writer:
             local.run('systemctl','disable','--now','remna-hy2-certs.timer')
             local.run('systemctl','stop','remna-hy2-certs.service')
-        section(3,'Применение: профиль, Host и сквады')
+        section(3,'Применение: профиль и Host')
         # Root-only journal is useful if an API call times out after being applied.
-        local.write(backup/'plan.json',json.dumps({'node':selected.uuid,'mapping':mapping,'grants':grants}))
-        provision.apply(api,selected,profile['config'],config,mapping,source,address,name,grants,backup,old.get('name'))
+        local.write(backup/'plan.json',json.dumps({'node':selected.uuid,'mapping':mapping}))
+        provision.apply(api,selected,profile['config'],config,mapping,source,address,name,backup,old.get('name'))
         current_profile=obj(api.request('GET','/config-profiles/'+selected.profile))
         tags={i['uuid']:i['tag'] for i in current_profile['inbounds']}
         inventory=[]

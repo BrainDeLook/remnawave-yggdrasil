@@ -1,4 +1,4 @@
-"""Panel-managed inbounds, activation and squad access. No subscriber credentials."""
+"""Panel-managed inbounds and activation; squad permissions belong to the panel. No subscriber credentials."""
 import copy
 import json
 from pathlib import Path
@@ -6,14 +6,8 @@ from api import API, Error, Host, Node, obj, seq, string, uid
 from converter import LABELS, HOST_SUFFIXES
 
 
-def squads(api: API) -> list[dict]:
-    response=obj(api.request('GET','/internal-squads'))
-    return [dict(uuid=uid(d,'uuid'),name=string(d,'name'),inbounds=[uid(obj(i),'uuid') for i in seq(d.get('inbounds'))])
-            for value in seq(response.get('internalSquads')) if (d:=obj(value))]
-
-
 def apply(api: API, node: Node, before: dict, config: dict, mapping: dict[str,str],
-          source: Host, address: str, name: str, grants: dict[str,list[str]], backup: Path,
+          source: Host, address: str, name: str, backup: Path,
           previous_name: str | None = None) -> list[dict]:
     """Preserve panel edits; only migrate names that exactly match our generated format."""
     selected=Node.parse(api.request('GET','/nodes/'+node.uuid),require_connected=False)
@@ -49,13 +43,6 @@ def apply(api: API, node: Node, before: dict, config: dict, mapping: dict[str,st
         existing=[h for h in all_hosts if marker in h.raw.get('tags',[]) and h.nodes==(node.uuid,) and h.inbound==identifier]
         if len(existing)>1: raise Error('Дублируются управляемые Host для '+tag)
         raw=next(i for i in config['inbounds'] if i['tag']==tag)
-        selected=grants[protocol]
-        # Read each squad just before changing it; keep every unrelated inbound.
-        for squad_uuid in selected:
-            squad=obj(api.request('GET','/internal-squads/'+squad_uuid))
-            inbounds=[uid(obj(i),'uuid') for i in seq(squad.get('inbounds'))]
-            if identifier not in inbounds:
-                api.request('PATCH','/internal-squads',{'uuid':squad_uuid,'inbounds':inbounds+[identifier]})
         if existing:
             host=existing[0]
             generated={prefix+separator+suffix for prefix in (name,previous_name or name)
@@ -71,9 +58,9 @@ def apply(api: API, node: Node, before: dict, config: dict, mapping: dict[str,st
         payload={'inbound':{'configProfileUuid':node.profile,'configProfileInboundUuid':identifier},
                  'remark':name+' '+HOST_SUFFIXES[protocol], 'address':address if protocol=='ygg' else source.address,
                  'port':raw['port'],'sni':sni,'fingerprint':'chrome' if protocol!='hy2' else None,
-                 'nodes':[node.uuid],'tags':[marker],'isDisabled':not selected,'isHidden':False,
+                 'nodes':[node.uuid],'tags':[marker],'isDisabled':False,'isHidden':False,
                  'overrideSniFromAddress':False,'keepSniBlank':False,
-                 'internalSquads':{'mode':'ALLOW_ONLY' if selected else 'EXCLUDE','squads':selected}}
+                 'internalSquads':{'mode':'EXCLUDE','squads':[]}}
         if protocol=='grpc': payload['path']=stream.get('grpcSettings',{}).get('serviceName','')
         if protocol=='xhttp': payload['path']=stream.get('xhttpSettings',{}).get('path','/')
         if protocol=='hy2': payload['alpn']='h3'

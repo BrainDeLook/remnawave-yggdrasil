@@ -300,10 +300,18 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         multi_args=[sys.executable,str(ROOT/'multi.py'),'--yes','--no-ssh','--panel','http://127.0.0.1:3000',
                     '--node',node['uuid'],'--source-host',source['uuid'],'--name','Multi CI',
                     '--protocol','hy2','--protocol','grpc','--protocol','xhttp','--protocol','ygg',
-                    '--squad',squad['uuid'],'--allow-ip','200:db8::111','--allow-ip','200:db8::333',
+                    '--allow-ip','200:db8::111','--allow-ip','200:db8::333',
                     '--allow-ip','300:db8:1:1::/64',
                     '--peer',f'tcp://127.0.0.1:{peer_port}']
+        squad_before=api.request('GET','/internal-squads/'+squad['uuid'])
         subprocess.run(multi_args,check=True)
+        assert api.request('GET','/internal-squads/'+squad['uuid'])==squad_before
+        pending=api.request('GET','/subscriptions/by-username/'+user['username'])['links']
+        assert not any('Multi CI' in urllib.parse.unquote(link) for link in pending)
+        # The administrator grants access in the panel, independently of installation.
+        installed=api.request('GET','/config-profiles/'+profile['uuid'])
+        api.request('PATCH','/internal-squads',{'uuid':squad['uuid'],
+                    'inbounds':[i['uuid'] for i in installed['inbounds']]})
         state=json.loads(Path('/etc/remnawave-yggdrasil/multi-state.json').read_text())
         assert json.loads(Path('/etc/remnawave-yggdrasil/cert-sync.json').read_text())['cert']==str(lineage/'fullchain.pem')
         assert (upstream_cert.read_bytes(),upstream_key.read_bytes())==upstream_before
@@ -350,7 +358,15 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         restricted_links=api.request('GET','/subscriptions/by-username/'+restricted['username'])['links']
         restricted_names=[urllib.parse.unquote(urllib.parse.urlsplit(link).fragment) for link in restricted_links]
         assert not any(h['name'] in restricted_names for h in state['hosts'])
-        print('PASS actual subscriptions: new servers appear only for permitted squads',flush=True)
+        # A second squad gains the server through its inbound alone, without editing Host.
+        ygg_entry=api.request('GET','/hosts/'+ygg_host['host_uuid'])
+        assert ygg_entry['internalSquads']=={'mode':'EXCLUDE','squads':[]}
+        api.request('PATCH','/internal-squads',{'uuid':other['uuid'],
+                    'inbounds':[inbound,ygg_entry['inbound']['configProfileInboundUuid']]})
+        granted_links=api.request('GET','/subscriptions/by-username/'+restricted['username'])['links']
+        assert ygg_host['name'] in [urllib.parse.unquote(urllib.parse.urlsplit(link).fragment) for link in granted_links]
+        api.request('PATCH','/internal-squads',{'uuid':other['uuid'],'inbounds':[inbound]})
+        print('PASS panel-only squad grants: installation leaves permissions unchanged; a second squad receives Ygg without Host edits',flush=True)
         run('ip','-6','addr','add','200:db8::ffff/128','dev','lo','nodad')
         run('ip','-n','remna-ygg-ci','-6','route','add','200:db8::ffff/128','via','fd42:4567::1','dev','ry-client')
         isolation="""import socket,sys
