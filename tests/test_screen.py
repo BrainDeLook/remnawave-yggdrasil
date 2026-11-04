@@ -16,9 +16,9 @@ import ui
 
 class Window:
     def __init__(self,keys=(),size=(24,80)):
-        self.keys=iter(keys); self.size=size; self.written=[]
+        self.keys=iter(keys); self.size=size; self.written=[]; self.cells={}
     def getmaxyx(self): return self.size
-    def erase(self): pass
+    def erase(self): self.cells={}
     def clear(self): pass
     def refresh(self): pass
     def move(self,row,col):
@@ -27,6 +27,7 @@ class Window:
     def addstr(self,row,col,text,*style):
         assert 0<=row<self.size[0] and col+width(text)<self.size[1]
         self.written.append(text)
+        self.cells[row]=text
 
 
 def terminal(window):
@@ -36,6 +37,31 @@ def terminal(window):
 
 
 class ScreenTests(unittest.TestCase):
+    def test_menu_and_input_stay_next_to_explanation_in_tall_windows(self):
+        for height in (24,40,60):
+            window=Window(['\n'],size=(height,100)); app=terminal(window)
+            app.lines=[('Дополнения для вашей ноды.','muted')]
+            app.select('Выберите действие',[('setup','Протоколы и доступ'),('exit','Выход')],'setup')
+            self.assertEqual(window.cells[4],'Дополнения для вашей ноды.')
+            self.assertEqual(window.cells[6],'Выберите действие')
+            self.assertIn('Протоколы и доступ',window.cells[8])
+            self.assertIn('Esc',window.cells[11])
+            window.keys=iter(['\n']); app.position=0; app.answers=[]
+            app.prompt('Адрес панели','https://panel.example.com')
+            self.assertEqual(app.input_row,8)
+            self.assertIn('https://panel.example.com',window.cells[8])
+
+    def test_all_control_types_fit_compact_window_with_wrapped_questions(self):
+        for label in ('Что добавить?','Каким сквадам выдать доступ?',
+                      'Разрешить также SSH через Yggdrasil?',
+                      'Сквады для VLESS Reality через Yggdrasil; пусто — настрою в панели'):
+            window=Window(size=(18,54)); app=terminal(window)
+            app.lines=[('Пояснение '+str(i),'text') for i in range(30)]
+            app.draw(label,'Enter далее · Esc назад', [('Вариант '+str(i),'text',False) for i in range(5)])
+            self.assertIn('Esc',window.cells[17])
+            self.assertEqual(len([text for text in window.cells.values() if text.startswith('Вариант')]),5)
+            self.assertTrue(any('PgUp/PgDn' in text for text in window.cells.values()))
+
     def test_eight_color_terminals_keep_help_text_visible(self):
         colors=[]
         curses=SimpleNamespace(has_colors=lambda:True,start_color=lambda:None,use_default_colors=lambda:None,

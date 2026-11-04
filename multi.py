@@ -20,7 +20,7 @@ import node as local
 import certificates
 import provision
 
-VERSION='0.3.0'
+VERSION='0.3.1'
 FILES=('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py','ui.py','screen.py')
 
 
@@ -102,6 +102,7 @@ def main(argv=None):
         if args.token_file.stat().st_mode & 0o077: raise Error('Закройте файл токена: chmod 600')
         token=args.token_file.read_text().strip()
     if not token and not args.yes:
+        ui.page('1 · API-токен')
         say('  Где взять токен: «Настройки Remnawave» → «Токены API».\n  Создайте отдельный временный токен с чтением и изменением профилей,\n  нод, Host и внутренних сквадов. Подойдёт временный полный доступ.')
         say('  Токен используется только в этом запуске и не сохраняется.','muted')
         token=secret_prompt('Вставьте API-токен панели')
@@ -114,6 +115,7 @@ def main(argv=None):
     try: nodes=api.nodes()
     except AccessRequired:
         if args.yes or secret: raise
+        ui.page('1 · Защита входа eGames')
         say('  Перед API обнаружена страница входа или HTML-заглушка.','warning')
         say('  При cookie-защите eGames нужна исходная секретная ссылка из\n  результата установки или меню eGames. После входа браузер обычно\n  убирает секрет из адресной строки. Обычный адрес панели не подходит.')
         say('  Пример: https://panel.example.com/auth/login?ИМЯ=ЗНАЧЕНИЕ','example')
@@ -132,26 +134,34 @@ def main(argv=None):
                   if uid(d:=obj(value),'uuid')!=selected.uuid]
     typed=Profile.parse(profile['config'])
     base_ids={i.uuid for i in selected.inbounds if i.tag in typed.bases}
-    source=choose([h for h in available if h.inbound in base_ids],args.source_host,old.get('source_host_uuid'),args.yes,'Исходный рабочий VLESS TCP Reality Host')
+    ui.page('2 · Исходное подключение')
+    say('  Выберите рабочий TCP Reality Host этой ноды.\n  Его параметры станут основой дополнительных подключений.')
+    source=choose([h for h in available if h.inbound in base_ids],args.source_host,old.get('source_host_uuid'),args.yes,'Исходный VLESS TCP Reality Host')
     base=next(i.tag for i in selected.inbounds if i.uuid==source.inbound)
     field('Адрес API выбранной ноды',selected.address)
     field('Профиль',profile['name'])
     field('Исходный inbound',base)
     section(3,'Какие подключения добавить')
     say('  Обычный TCP Reality сохраняется. Дополнения можно выбирать независимо.\n  Если такой протокол уже есть в профиле, мастер использует его настройки.')
-    option(1,'Hysteria2','UDP 443; требуется TLS-сертификат домена')
-    option(2,'VLESS gRPC Reality','TCP 8443')
-    option(3,'VLESS XHTTP Reality','TCP 4443')
-    option(4,'VLESS Reality через Yggdrasil','TCP 1488; сеть Yggdrasil')
+    if not ui.fullscreen():
+        option(1,'Hysteria2','UDP 443; требуется TLS-сертификат домена')
+        option(2,'VLESS gRPC Reality','TCP 8443')
+        option(3,'VLESS XHTTP Reality','TCP 4443')
+        option(4,'VLESS Reality через Yggdrasil','TCP 1488; сеть Yggdrasil')
     say('  Отметьте дополнения пробелом и нажмите Enter.' if ui.fullscreen() else
         '  Пример ввода: 4 — только Yggdrasil; 1 4 — Hysteria2 и Yggdrasil.','example')
     protocols=args.protocol
     if not protocols and not args.yes:
-        protocols=ui.multi_select('Нужные дополнения',list(LABELS.items()),['ygg'],allow_empty=False)
+        protocols=ui.multi_select('Что добавить?',[
+            ('hy2','Hysteria2 · UDP 443 · нужен сертификат'),
+            ('grpc','gRPC Reality · TCP 8443'),
+            ('xhttp','XHTTP Reality · TCP 4443'),
+            ('ygg','Yggdrasil Reality · TCP 1488')],['ygg'],allow_empty=False)
     config,mapping=convert(typed,base,protocols,{'ygg':args.ygg_port})
     raw_by_tag={i['tag']:i for i in config['inbounds']}
     name=args.name or old.get('name') or selected.name
     if not args.yes and not args.name:
+        ui.page('3 · Название подключений')
         say('  Общее название без протокола. Например: 🇳🇱 Нидерланды.\n  Мастер добавит короткое окончание Histeria, GRPC, XHTTP или Ygg.','example')
         name=prompt('Общее название сервера',name)
     if not 1<=len(name)<=60 or any(c in name for c in '\r\n'): raise Error('Название должно содержать от 1 до 60 символов')
@@ -165,8 +175,11 @@ def main(argv=None):
     say('  У уже существующих Host сохраняются ограничения, заданные в панели.\n  Выбор ниже добавляет доступ к inbound, но не меняет ограничения такого Host.','muted')
     for p in protocols:
         if args.yes or args.squad: continue
+        if ui.fullscreen():
+            ui.page('4 · Доступ · '+HOST_SUFFIXES[p])
+            say('  Отметьте группы VPN-пользователей для этого подключения.\n  Без выбора новый Host будет выключен: доступ можно настроить в панели.')
         say('\n  '+LABELS[p],'section')
-        grants[p]=ui.multi_select('Сквады для '+LABELS[p]+'; пусто — настрою в панели',
+        grants[p]=ui.multi_select('Каким сквадам выдать доступ?',
                                  [(s['uuid'],s['name']) for s in all_squads],[])
     # Omitting Yggdrasil means leave it alone, including the saved SSH/access state.
     allowed=old.get('allowed',[]); ssh_allowed=old.get('ssh_allowed',[]); ssh_enabled=old.get('ssh',False)
@@ -175,8 +188,9 @@ def main(argv=None):
     if 'ygg' in protocols:
         section(5,'Устройства Yggdrasil и доступ по SSH')
         say('  VPN проверяет учётную запись Remnawave и доступ к inbound.\n  Выберите, нужно ли дополнительно ограничивать IPv6 устройств.')
-        option(1,'По подписке','любой адрес Yggdrasil; IP клиентов вводить не нужно')
-        option(2,'По подписке и списку IP','дополнительное ограничение устройств')
+        if not ui.fullscreen():
+            option(1,'По подписке','любой адрес Yggdrasil; IP клиентов вводить не нужно')
+            option(2,'По подписке и списку IP','дополнительное ограничение устройств')
         access_mode=args.access_mode or ('restricted' if args.allow_ip else access_mode)
         if not args.yes and not args.access_mode and not args.allow_ip:
             if ui.fullscreen():
@@ -206,9 +220,11 @@ def main(argv=None):
             restricted_allowed=allowed
         ssh_enabled=args.ssh or (old.get('ssh',False) and not args.no_ssh)
         if not args.yes and not args.ssh and not args.no_ssh:
+            ui.page('5 · SSH через Yggdrasil')
             say('\n  SSH позволяет управлять VPS через Yggdrasil. Для VPN он не обязателен.')
             ssh_enabled=confirm('Разрешить также SSH через Yggdrasil?',ssh_enabled)
         if ssh_enabled:
+            ui.page('5 · Доступ к SSH')
             say('\n  Кому разрешить управление VPS по SSH','section')
             say('  Это отдельный список. Например, другу можно выдать VPN, а SSH — только\n  себе. Для входа всё равно потребуется существующий ключ или пароль VPS.\n  Enter оставит предложенные ниже адреса. Можно ввести свой список.')
             say('  Пример: IPv6 роутера 200:1111:2222:3333:4444:5555:6666:7777\n  или подсеть вашей LAN 300:1111:2222:3333::/64.\n  OpenWrt → Сеть → Интерфейсы → Yggdrasil: IPv6 без /7, IPv6-PD с /64.','example')

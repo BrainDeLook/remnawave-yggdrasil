@@ -53,7 +53,7 @@ def available(argv: list[str]) -> bool:
 class Screen:
     def __init__(self,window,curses,version: str):
         self.window=window; self.curses=curses; self.version=version
-        self.title='Главное меню'; self.lines=[]; self.offset=0; self.page_size=1
+        self.title='Главное меню'; self.lines=[]; self.offset=0; self.page_size=1; self.input_row=6
         self.answers=[]; self.position=0; self.replay_until=0
         self.environment={}; self.applying=False; self.log=None
         self.palette={}
@@ -72,7 +72,7 @@ class Screen:
         style=self.palette.get(tone,0) | (self.curses.A_REVERSE if reverse else 0)
         self.window.addstr(row,2,value,style)
 
-    def draw(self,label: str='',footer: str='PgUp/PgDn — текст   Esc — назад',extra: list=()):
+    def draw(self,label: str='',footer: str='Esc — назад',extra: list=()):
         window=self.window; window.erase(); height,columns=window.getmaxyx()
         if height<18 or columns<54:
             self.line(1,'Увеличьте окно: нужно от 54 × 18.','warning')
@@ -84,14 +84,20 @@ class Screen:
         for text,tone in self.lines:
             for paragraph in text.splitlines() or ['']:
                 rows.extend((part,tone) for part in wrap(paragraph,columns-5))
-        label_row=min(height-5,min((row for row,*_ in extra),default=height-3)-2)
-        space=max(0,label_row-5)
+        # Body, question and controls form one block; only long bodies scroll.
+        labels=wrap(label,columns-5) if label else []
+        space=max(1,height-8-len(extra)-len(labels)) if label or extra else height-6
         self.page_size=max(1,space)
         self.offset=max(0,min(self.offset,max(0,len(rows)-space)))
-        for row,(text,tone) in enumerate(rows[self.offset:self.offset+space],4): self.line(row,text,tone)
-        for row,text,tone,reverse in extra: self.line(row,text,tone,reverse)
-        self.line(label_row,label,'question')
-        self.line(height-1,footer,'muted')
+        visible=rows[self.offset:self.offset+space]
+        for row,(text,tone) in enumerate(visible,4): self.line(row,text,tone)
+        label_row=4+len(visible)+(1 if visible else 0)
+        for row,part in enumerate(labels,label_row): self.line(row,part,'question')
+        self.input_row=label_row+len(labels)+1
+        for index,(text,tone,reverse) in enumerate(extra): self.line(self.input_row+index,text,tone,reverse)
+        if len(rows)>space:
+            self.line(3,f'Текст: PgUp/PgDn · {self.offset+1}–{self.offset+len(visible)} из {len(rows)}','muted')
+        self.line(min(height-1,self.input_row+len(extra)+1),footer,'muted')
         window.refresh(); return True
 
     def page(self,title: str):
@@ -100,7 +106,7 @@ class Screen:
         if self.position>=self.replay_until: self.draw(footer='Подготовка…')
 
     def say(self,text: str,tone: str='text'):
-        self.lines.append((text.strip('\n'),tone))
+        self.lines.append(('\n'.join(line.strip() for line in text.strip('\n').splitlines()),tone))
         if self.log:
             self.log.write(text+'\n'); self.log.flush()
         if self.position>=self.replay_until:
@@ -134,19 +140,19 @@ class Screen:
             self.curses.curs_set(1)
             try:
                 while True:
-                    height,columns=self.window.getmaxyx()
+                    _,columns=self.window.getmaxyx()
                     footer='Enter — продолжить   Esc — назад   Ctrl+U — очистить'
                     display='[ввод скрыт'+('; Enter — оставить введённое' if previous else '')+']' if secret else value
                     start=0
                     if not secret:
                         while width(value[start:cursor])>max(1,columns-7): start+=1
                         display=value[start:]
-                    ready=self.draw(label,footer,[(height-3,'> '+display,'value',False)])
+                    ready=self.draw(label,footer,[('> '+display,'value',False)])
                     if ready:
                         # refresh() can process SIGWINCH after the layout was calculated.
                         current_height,current_columns=self.window.getmaxyx()
                         column=4 if secret else 4+width(value[start:cursor])
-                        self.window.move(max(0,current_height-3),min(column,max(0,current_columns-2)))
+                        self.window.move(min(self.input_row,max(0,current_height-2)),min(column,max(0,current_columns-2)))
                         self.window.refresh()
                     key=self.window.get_wch()
                     if key=='\x03': raise KeyboardInterrupt
@@ -179,15 +185,17 @@ class Screen:
             index=next((i for i,(key,_) in enumerate(choices) if key==(previous if not multiple else None)),0)
             error=''
             while True:
-                height,_=self.window.getmaxyx(); count=max(1,min(len(choices),height//2-2))
+                height,columns=self.window.getmaxyx()
+                count=max(1,min(len(choices),height-10-len(wrap(label,columns-5))))
                 start=max(0,min(index-count//2,len(choices)-count))
                 rows=[]
-                for row,(key,name) in enumerate(choices[start:start+count],height-6-count):
+                for key,name in choices[start:start+count]:
                     number=start+len(rows)
                     prefix=('[x] ' if key in selected else '[ ] ') if multiple else '  '
-                    rows.append((row,('→ ' if number==index else '  ')+prefix+name,'value' if number==index else 'text',number==index))
-                footer='↑↓ выбор · '+('Пробел отметка · ' if multiple else '')+'Enter далее · Esc назад · PgUp/PgDn текст'
-                ready=self.draw(error or label,footer,rows)
+                    rows.append((('› ' if number==index else '  ')+prefix+name,'section' if number==index else 'text',number==index))
+                footer='↑↓ выбор · '+('Пробел отметка · ' if multiple else '')+'Enter далее · Esc назад'
+                choice_label=f'{label} · {index+1}/{len(choices)}' if len(choices)>count else label
+                ready=self.draw(error or choice_label,footer,rows)
                 key=self.key()
                 if not ready: continue
                 if key==self.curses.KEY_UP: index=(index-1)%len(choices)
@@ -206,6 +214,7 @@ class Screen:
 
     def view(self,title: str,text: str=''):
         if text: self.page(title); self.lines=[(line,'text') for line in text.splitlines()]
+        self.offset=0
         while True:
             self.draw('','↑↓ / PgUp / PgDn — прокрутка   Enter / Esc — в меню')
             key=self.window.get_wch()
@@ -291,15 +300,15 @@ def launch(callback,result,version: str,argv: list[str]) -> bool:
         first=True
         while True:
             app.finish(); app.page('Главное меню')
-            app.say('Настройка существующей ноды Remnawave. До подтверждения\nможно вернуться назад и изменить ответы.')
+            app.say('Дополнительные подключения для вашей ноды.','muted')
             in_menu=True
             try:
                 if first and argv: selected='setup'
                 else:
                     selected=app.select('Выберите действие',[
-                        ('setup','Установить / изменить дополнительные протоколы'),
-                        ('network','Настроить Yggdrasil и SSH'),
-                        ('result','Показать подключения'),('logs','Диагностика и журналы'),('exit','Выход')],'setup')
+                        ('setup','Протоколы и доступ'),
+                        ('network','Yggdrasil и SSH'),
+                        ('result','Мои подключения'),('logs','Диагностика и журналы'),('exit','Выход')],'setup')
                 first=False; app.answers=[]; app.position=0
                 in_menu=False
                 if selected=='exit': return True
