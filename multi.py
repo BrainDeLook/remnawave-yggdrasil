@@ -348,6 +348,7 @@ def main(argv=None):
     say('  Если профиль общий, новые inbound активируются только на выбранной ноде.\n  Прежние inbound, Host и разрешения сохраняются. Отсутствие протокола\n  в текущем выборе не удаляет уже настроенное подключение.','muted')
     if args.check: say('\n  Проверка завершена. План корректен; рабочие настройки не применялись.','success'); return
     if not args.yes and not confirm('Применить показанный план?'):
+        ui.page('Настройка отменена')
         say('  Отменено. Рабочие настройки не применялись.','warning'); return
     ui.begin_apply()
     local.BASE.mkdir(parents=True,exist_ok=True,mode=0o700); local.BASE.chmod(0o700)
