@@ -321,8 +321,8 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         assert api.request('GET','/hosts/'+source['uuid'])==snapshot['source']
         ygg_host=next(h for h in state['hosts'] if h['protocol']=='ygg')
         ygg_raw=next(i for i in actual['config']['inbounds'] if i['tag']==ygg_host['tag'])
-        time.sleep(10)
-        verify(export(ygg_raw,dict(source,address=address,port=1488),user)[1])
+        # Squad changes propagate asynchronously through the panel's node queue.
+        wait(lambda: verify(export(ygg_raw,dict(source,address=address,port=1488),user)[1]) is None,seconds=90)
         verify(public_client)
         links=api.request('GET','/subscriptions/by-username/'+user['username'])['links']
         parsed=[urllib.parse.urlsplit(link) for link in links]
