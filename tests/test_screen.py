@@ -19,6 +19,7 @@ class Window:
         self.keys=iter(keys); self.size=size; self.written=[]
     def getmaxyx(self): return self.size
     def erase(self): pass
+    def clear(self): pass
     def refresh(self): pass
     def move(self,row,col):
         assert 0<=row<self.size[0] and 0<=col<self.size[1]

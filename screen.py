@@ -95,6 +95,7 @@ class Screen:
 
     def page(self,title: str):
         self.title=title; self.lines=[]; self.offset=0
+        self.window.clear()
         if self.position>=self.replay_until: self.draw(footer='Подготовка…')
 
     def say(self,text: str,tone: str='text'):
