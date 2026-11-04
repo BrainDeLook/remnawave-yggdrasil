@@ -308,6 +308,12 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         assert api.request('GET','/internal-squads/'+squad['uuid'])==squad_before
         pending=api.request('GET','/subscriptions/by-username/'+user['username'])['links']
         assert not any('Multi CI' in urllib.parse.unquote(link) for link in pending)
+        # Profile reloads are deduplicated by profile UUID in Remnawave. Wait until
+        # installation's queue finishes before simulating a separate panel action.
+        wait(lambda: run('docker','exec','test-remna-redis','valkey-cli','EXISTS',
+                         'bull:NODES_START_ALL_BY_PROFILE_QUEUE:de:'+profile['uuid']).strip()=='0')
+        wait(lambda: all((current:=api.request('GET','/nodes/'+n['uuid']))['isConnected']
+                         and not current['isConnecting'] for n in (node,shared_node)))
         # The administrator grants access in the panel, independently of installation.
         installed=api.request('GET','/config-profiles/'+profile['uuid'])
         api.request('PATCH','/internal-squads',{'uuid':squad['uuid'],
