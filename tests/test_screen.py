@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from screen import Answer,Back,Screen,available,clean,clip,width,wrap
+from screen import Answer,Back,Screen,available,clean,clip,content_start,width,wrap
 import node
 import ui
 
@@ -96,14 +96,15 @@ class ScreenTests(unittest.TestCase):
             window=Window(['\n'],size=(height,100)); app=terminal(window)
             app.lines=[('Дополнения для вашей ноды.','muted')]
             app.select('Выберите действие',[('setup','Протоколы и доступ'),('exit','Выход')],'setup')
-            self.assertEqual(window.cells[4],'Дополнения для вашей ноды.')
-            self.assertEqual(window.cells[6],'Выберите действие')
-            self.assertIn('Протоколы и доступ',window.cells[8])
-            self.assertIn('Esc',window.cells[11])
+            start=content_start(height,100)
+            self.assertEqual(window.cells[start],'Дополнения для вашей ноды.')
+            self.assertEqual(window.cells[start+2],'Выберите действие')
+            self.assertIn('Протоколы и доступ',window.cells[start+4])
+            self.assertIn('Esc',window.cells[start+7])
             window.keys=iter(['\n']); app.position=0; app.answers=[]
             app.prompt('Адрес панели','https://panel.example.com')
-            self.assertEqual(app.input_row,8)
-            self.assertIn('https://panel.example.com',window.cells[8])
+            self.assertEqual(app.input_row,start+4)
+            self.assertIn('https://panel.example.com',window.cells[start+4])
 
     def test_all_control_types_fit_compact_window_with_wrapped_questions(self):
         for label in ('Что добавить?','Каким сквадам выдать доступ?',

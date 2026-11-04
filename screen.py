@@ -13,6 +13,14 @@ import unicodedata
 
 LOG_DIR=Path('/var/log/remnawave-yggdrasil')
 ESCAPES=re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))')
+BANNER=(
+    '██████╗ ███████╗███╗   ███╗███╗   ██╗ █████╗ ██╗   ██╗ ██████╗  ██████╗ ',
+    '██╔══██╗██╔════╝████╗ ████║████╗  ██║██╔══██╗╚██╗ ██╔╝██╔════╝ ██╔════╝ ',
+    '██████╔╝█████╗  ██╔████╔██║██╔██╗ ██║███████║ ╚████╔╝ ██║  ███╗██║  ███╗',
+    '██╔══██╗██╔══╝  ██║╚██╔╝██║██║╚██╗██║██╔══██║  ╚██╔╝  ██║   ██║██║   ██║',
+    '██║  ██║███████╗██║ ╚═╝ ██║██║ ╚████║██║  ██║   ██║   ╚██████╔╝╚██████╔╝',
+    '╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝   ╚═╝    ╚═════╝  ╚═════╝ ',
+)
 
 
 def clean(text: str) -> str:
@@ -70,6 +78,10 @@ def available(argv: list[str]) -> bool:
             and not plain.intersection(argv))
 
 
+def content_start(height: int,columns: int) -> int:
+    return 9 if height>=25 and columns>=90 else 4
+
+
 class Screen:
     def __init__(self,window,curses,version: str):
         self.window=window; self.curses=curses; self.version=version
@@ -97,13 +109,19 @@ class Screen:
             self.line(1,'Увеличьте окно: нужно от 54 × 18.','warning')
             self.line(3,'Размер сейчас: '+str(columns)+' × '+str(height))
             window.refresh(); return False
-        inner=columns-6
-        brand=' YGG / REMNAWAVE '
+        inner=columns-6; body_row=content_start(height,columns)
+        brand=' RemnaYgg '
         version=' v'+self.version+' '
         self.line(0,'╭─'+brand+'─'*max(0,inner-width(brand+version)-1)+version+'╮','section')
-        title=elide(self.title,inner-2)
-        self.line(1,'│ '+title+' '*(inner-1-width(title))+'│','section')
-        self.line(2,'╰'+'─'*inner+'╯','section')
+        title=elide(self.title,inner-4)
+        if body_row==9:
+            for row,art in enumerate(BANNER,1):
+                left=(inner-width(art))//2
+                self.line(row,'│'+' '*left+art+' '*(inner-left-width(art))+'│','example' if row>=4 else 'section')
+            self.line(7,'╰─ '+title+' '+'─'*(inner-3-width(title))+'╯','section')
+        else:
+            self.line(1,'│ '+title+' '*(inner-1-width(title))+'│','section')
+            self.line(2,'╰'+'─'*inner+'╯','section')
         rows=[]
         for text,tone in self.lines:
             for paragraph in text.splitlines() or ['']:
@@ -111,17 +129,17 @@ class Screen:
         # Body, question and controls form one block; only long bodies scroll.
         labels=wrap(clean(label),columns-5) if label else []
         footers=wrap(footer,columns-5)
-        space=max(1,height-7-len(extra)-len(labels)-len(footers)) if label or extra else height-5-len(footers)
+        space=max(1,height-body_row-3-len(extra)-len(labels)-len(footers)) if label or extra else height-body_row-1-len(footers)
         self.page_size=max(1,space)
         self.offset=max(0,min(self.offset,max(0,len(rows)-space)))
         visible=rows[self.offset:self.offset+space]
-        for row,(text,tone) in enumerate(visible,4): self.line(row,text,tone)
-        label_row=4+len(visible)+(1 if visible else 0)
+        for row,(text,tone) in enumerate(visible,body_row): self.line(row,text,tone)
+        label_row=body_row+len(visible)+(1 if visible else 0)
         for row,part in enumerate(labels,label_row): self.line(row,part,'question')
         self.input_row=label_row+len(labels)+1
         for index,(text,tone,reverse) in enumerate(extra): self.line(self.input_row+index,text,tone,reverse)
         if len(rows)>space:
-            self.line(3,f'Текст: PgUp/PgDn · {self.offset+1}–{self.offset+len(visible)} из {len(rows)}','muted')
+            self.line(body_row-1,f'Текст: PgUp/PgDn · {self.offset+1}–{self.offset+len(visible)} из {len(rows)}','muted')
         footer_row=min(height-len(footers),self.input_row+len(extra)+1)
         for row,part in enumerate(footers,footer_row): self.line(row,part,'muted')
         window.refresh(); return True
@@ -215,7 +233,7 @@ class Screen:
             error=''
             while True:
                 height,columns=self.window.getmaxyx()
-                count=max(1,min(len(choices),height-12-len(wrap(label,columns-5))))
+                count=max(1,min(len(choices),height-content_start(height,columns)-8-len(wrap(label,columns-5))))
                 start=max(0,min(index-count//2,len(choices)-count))
                 rows=[]
                 for key,name in choices[start:start+count]:

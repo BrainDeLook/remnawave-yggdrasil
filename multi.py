@@ -115,7 +115,7 @@ def main(argv=None):
     if args.result: result(); return
     local.preflight()
     if sys.stdin.isatty() and not ui.fullscreen(): termios.tcflush(sys.stdin.fileno(),termios.TCIFLUSH)
-    frame('Remnawave · дополнительные протоколы · '+VERSION,[
+    frame('RemnaYgg · дополнительные протоколы · '+VERSION,[
         ('Мастер для VPS с уже работающей нодой Remnawave.','text'),
         ('Вы выбираете протоколы и группы пользователей. Скрипт готовит VPS,','text'),
         ('добавляет inbound и Host через API, затем выдаёт результат.','text'),
