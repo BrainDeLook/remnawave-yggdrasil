@@ -20,7 +20,7 @@ import node as local
 import certificates
 import provision
 
-VERSION='0.3.2'
+VERSION='0.3.3'
 FILES=('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py','ui.py','screen.py')
 
 

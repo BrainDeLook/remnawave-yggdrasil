@@ -95,6 +95,12 @@ class Screen:
                  ('value',10),('success',10),('example',12),('warning',11),('error',9)],1):
                 if curses.COLORS<16: color=7 if tone=='muted' else color%8
                 curses.init_pair(index,color,-1); self.palette[tone]=curses.color_pair(index)
+            # Fixed xterm-256 colours: blue -> cyan -> ice blue, one step per row.
+            # Do not alter the terminal's global palette or depend on theme-defined blue.
+            if curses.COLORS>=256:
+                for row,color in enumerate((39,45,81,117,153,195),1):
+                    curses.init_pair(9+row,color,-1)
+                    self.palette['banner'+str(row)]=curses.color_pair(9+row)
 
     def line(self,row: int,text: str,tone: str='text',reverse: bool=False):
         height,columns=self.window.getmaxyx()
@@ -117,7 +123,8 @@ class Screen:
         if body_row==9:
             for row,art in enumerate(BANNER,1):
                 left=(inner-width(art))//2
-                self.line(row,'│'+' '*left+art+' '*(inner-left-width(art))+'│','example' if row>=4 else 'section')
+                tone='banner'+str(row) if 'banner'+str(row) in self.palette else 'section'
+                self.line(row,'│'+' '*left+art+' '*(inner-left-width(art))+'│',tone)
             self.line(7,'╰─ '+title+' '+'─'*(inner-3-width(title))+'╯','section')
         else:
             self.line(1,'│ '+title+' '*(inner-1-width(title))+'│','section')
