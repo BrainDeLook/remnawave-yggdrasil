@@ -10,7 +10,8 @@ if [[ -t 1 && ${TERM:-} != dumb && ! -v NO_COLOR ]]; then
 fi
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     printf '%s\n' 'Remnawave + Yggdrasil: запуск на VPS действующей ноды.' \
-      'sudo bash install.sh  — цветной мастер' \
+      'sudo bash install.sh  — экранное меню через SSH' \
+      'sudo bash install.sh --plain  — обычный текстовый мастер' \
       'sudo bash install.sh --check  — только проверка API и план' \
       'Протоколы: Hysteria2, VLESS gRPC, VLESS XHTTP, VLESS через Yggdrasil.' \
       'API-токен вводится скрыто и не сохраняется.'
