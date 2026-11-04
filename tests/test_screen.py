@@ -99,6 +99,13 @@ class ScreenTests(unittest.TestCase):
         window.refresh=lambda:setattr(window,'size',(18,60))
         self.assertEqual(app.prompt('Имя'),'я')
 
+    def test_plan_pagination_does_not_skip_lines_in_a_short_window(self):
+        window=Window(size=(18,80)); app=terminal(window)
+        window.keys=iter([app.curses.KEY_NPAGE]*10+['\n'])
+        app.lines=[('строка '+str(i),'text') for i in range(25)]
+        self.assertEqual(app.select('Применить план?',[('yes','Да'),('no','Нет')],'no'),'no')
+        self.assertTrue(all('строка '+str(i) in window.written for i in range(25)))
+
     def test_docker_secrets_are_excluded_from_command_log(self):
         logged=[]
         output=subprocess.CompletedProcess([],0,'SECRET_KEY=PRIVATE','')

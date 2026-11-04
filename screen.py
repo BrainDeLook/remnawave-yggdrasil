@@ -53,7 +53,7 @@ def available(argv: list[str]) -> bool:
 class Screen:
     def __init__(self,window,curses,version: str):
         self.window=window; self.curses=curses; self.version=version
-        self.title='Главное меню'; self.lines=[]; self.offset=0
+        self.title='Главное меню'; self.lines=[]; self.offset=0; self.page_size=1
         self.answers=[]; self.position=0; self.replay_until=0
         self.environment={}; self.applying=False; self.log=None
         self.palette={}
@@ -74,8 +74,8 @@ class Screen:
 
     def draw(self,label: str='',footer: str='PgUp/PgDn — текст   Esc — назад',extra: list=()):
         window=self.window; window.erase(); height,columns=window.getmaxyx()
-        if height<14 or columns<54:
-            self.line(1,'Увеличьте окно: нужно от 54 × 14.','warning')
+        if height<18 or columns<54:
+            self.line(1,'Увеличьте окно: нужно от 54 × 18.','warning')
             self.line(3,'Размер сейчас: '+str(columns)+' × '+str(height))
             window.refresh(); return False
         self.line(0,'Remnawave + Yggdrasil · '+self.version,'section')
@@ -86,6 +86,7 @@ class Screen:
                 rows.extend((part,tone) for part in wrap(paragraph,columns-5))
         label_row=min(height-5,min((row for row,*_ in extra),default=height-3)-2)
         space=max(0,label_row-5)
+        self.page_size=max(1,space)
         self.offset=max(0,min(self.offset,max(0,len(rows)-space)))
         for row,(text,tone) in enumerate(rows[self.offset:self.offset+space],4): self.line(row,text,tone)
         for row,text,tone,reverse in extra: self.line(row,text,tone,reverse)
@@ -123,8 +124,8 @@ class Screen:
         if value in ('\x1b',self.curses.KEY_LEFT):
             if self.applying: return None
             raise Back(self.position-2)
-        if value==self.curses.KEY_PPAGE: self.offset=max(0,self.offset-5)
-        if value==self.curses.KEY_NPAGE: self.offset+=5
+        if value==self.curses.KEY_PPAGE: self.offset=max(0,self.offset-self.page_size)
+        if value==self.curses.KEY_NPAGE: self.offset+=self.page_size
         return value
 
     def prompt(self,label: str,default: str='',secret: bool=False) -> str:
@@ -161,8 +162,8 @@ class Screen:
                     elif key==self.curses.KEY_HOME: cursor=0
                     elif key==self.curses.KEY_END: cursor=len(value)
                     elif key=='\x15': value=''; cursor=0
-                    elif key==self.curses.KEY_PPAGE: self.offset=max(0,self.offset-5)
-                    elif key==self.curses.KEY_NPAGE: self.offset+=5
+                    elif key==self.curses.KEY_PPAGE: self.offset=max(0,self.offset-self.page_size)
+                    elif key==self.curses.KEY_NPAGE: self.offset+=self.page_size
                     elif isinstance(key,str) and key.isprintable():
                         value=value[:cursor]+key+value[cursor:]; cursor+=len(key)
             finally: self.curses.curs_set(0)
@@ -210,8 +211,8 @@ class Screen:
             key=self.window.get_wch()
             if key in ('\x1b','\n','\r',self.curses.KEY_ENTER): return
             if key=='\x03': raise KeyboardInterrupt
-            if key in (self.curses.KEY_DOWN,self.curses.KEY_NPAGE): self.offset+=1 if key==self.curses.KEY_DOWN else 8
-            if key in (self.curses.KEY_UP,self.curses.KEY_PPAGE): self.offset=max(0,self.offset-(1 if key==self.curses.KEY_UP else 8))
+            if key in (self.curses.KEY_DOWN,self.curses.KEY_NPAGE): self.offset+=1 if key==self.curses.KEY_DOWN else self.page_size
+            if key in (self.curses.KEY_UP,self.curses.KEY_PPAGE): self.offset=max(0,self.offset-(1 if key==self.curses.KEY_UP else self.page_size))
             if key==self.curses.KEY_HOME: self.offset=0
 
     def begin_apply(self):
