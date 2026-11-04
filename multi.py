@@ -12,6 +12,7 @@ import subprocess
 import sys
 import termios
 import time
+import ui
 from api import API, AccessRequired, Error, obj, seq, string, uid
 from converter import Profile, convert, LABELS, HOST_SUFFIXES
 from ui import say, prompt, choose, access, section, field, option, panel as frame, secret as secret_prompt, confirm
@@ -19,11 +20,12 @@ import node as local
 import certificates
 import provision
 
-VERSION='0.2.4'
-FILES=('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py','ui.py')
+VERSION='0.3.0'
+FILES=('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py','ui.py','screen.py')
 
 
 def result():
+    ui.page('Сохранённые подключения')
     state=json.loads((local.BASE/'multi-state.json').read_text())
     frame('УСТАНОВКА ЗАВЕРШЕНА',[(state['name'],'success'),('Ниже — сохранённые настройки этой ноды.','text')],'success')
     field('Профиль в панели',state['profile'])
@@ -49,9 +51,10 @@ def result():
     say('\n  Проверены настройки API и TCP-слушатели. Открытие сайтов проверьте\n  в своём клиенте после обновления подписки. Вывод выше — сохранённый\n  результат установки; изменения в панели после запуска здесь не отражаются.','muted')
 
 
-def main():
+def main(argv=None):
     parser=argparse.ArgumentParser(description='Remnawave: дополнительные протоколы в существующем профиле и сквадах')
     parser.add_argument('--version',action='version',version=VERSION)
+    parser.add_argument('--plain',action='store_true',help='Обычный текстовый мастер вместо экранного меню')
     parser.add_argument('--panel'); parser.add_argument('--token-file',type=Path); parser.add_argument('--access-file',type=Path)
     parser.add_argument('--node'); parser.add_argument('--source-host'); parser.add_argument('--name')
     parser.add_argument('--protocol',action='append',choices=LABELS,default=[])
@@ -68,14 +71,14 @@ def main():
     parser.add_argument('--yes',action='store_true'); parser.add_argument('--check',action='store_true')
     parser.add_argument('--result',action='store_true'); parser.add_argument('--network-only',action='store_true',help=argparse.SUPPRESS)
     parser.add_argument('--sync-certs',action='store_true',help=argparse.SUPPRESS)
-    args=parser.parse_args()
+    args=parser.parse_args(argv)
     if args.access_mode=='subscription' and args.allow_ip:
         parser.error('--allow-ip используется только с --access-mode restricted')
     if args.network_only: local.network_only(); return
     if args.sync_certs: certificates.sync(); return
     if args.result: result(); return
     local.preflight()
-    if sys.stdin.isatty(): termios.tcflush(sys.stdin.fileno(),termios.TCIFLUSH)
+    if sys.stdin.isatty() and not ui.fullscreen(): termios.tcflush(sys.stdin.fileno(),termios.TCIFLUSH)
     frame('Remnawave · дополнительные протоколы · '+VERSION,[
         ('Мастер для VPS с уже работающей нодой Remnawave.','text'),
         ('Вы выбираете протоколы и группы пользователей. Скрипт готовит VPS,','text'),
@@ -92,7 +95,7 @@ def main():
         say('  Пример: https://panel.example.com','example')
         panel=prompt('Адрес панели Remnawave')
     if not panel: raise Error('Укажите --panel')
-    token=os.environ.pop('REMNAWAVE_API_TOKEN','')
+    token=ui.env_secret('REMNAWAVE_API_TOKEN')
     if args.token_file:
         if args.token_file.stat().st_mode & 0o077: raise Error('Закройте файл токена: chmod 600')
         token=args.token_file.read_text().strip()
@@ -101,7 +104,7 @@ def main():
         say('  Токен используется только в этом запуске и не сохраняется.','muted')
         token=secret_prompt('Вставьте API-токен панели')
     api=API(panel,token)
-    secret=os.environ.pop('REMNAWAVE_PANEL_ACCESS','')
+    secret=ui.env_secret('REMNAWAVE_PANEL_ACCESS')
     if args.access_file:
         if args.access_file.stat().st_mode & 0o077: raise Error('Закройте файл доступа: chmod 600')
         secret=args.access_file.read_text().strip()
@@ -138,14 +141,11 @@ def main():
     option(2,'VLESS gRPC Reality','TCP 8443')
     option(3,'VLESS XHTTP Reality','TCP 4443')
     option(4,'VLESS Reality через Yggdrasil','TCP 1488; сеть Yggdrasil')
-    say('  Пример ввода: 4 — только Yggdrasil; 1 4 — Hysteria2 и Yggdrasil.','example')
+    say('  Отметьте дополнения пробелом и нажмите Enter.' if ui.fullscreen() else
+        '  Пример ввода: 4 — только Yggdrasil; 1 4 — Hysteria2 и Yggdrasil.','example')
     protocols=args.protocol
     if not protocols and not args.yes:
-        keys=list(LABELS)
-        while not protocols:
-            answer=prompt('Нужные дополнения','4').split()
-            if answer and all(n in ('1','2','3','4') for n in answer): protocols=list(dict.fromkeys(keys[int(n)-1] for n in answer))
-            else: say('  Введите номера от 1 до 4 через пробел. Например: 1 4','error')
+        protocols=ui.multi_select('Нужные дополнения',list(LABELS.items()),['ygg'],allow_empty=False)
     config,mapping=convert(typed,base,protocols,{'ygg':args.ygg_port})
     raw_by_tag={i['tag']:i for i in config['inbounds']}
     name=args.name or old.get('name') or selected.name
@@ -164,13 +164,8 @@ def main():
     for p in protocols:
         if args.yes or args.squad: continue
         say('\n  '+LABELS[p],'section')
-        for index,squad in enumerate(all_squads,1): option(index,squad['name'])
-        while True:
-            answer=prompt('Номера сквадов через пробел; Enter — настрою в панели').split()
-            if not answer: break
-            if all(v.isdigit() and 1<=int(v)<=len(all_squads) for v in answer):
-                grants[p]=list(dict.fromkeys(all_squads[int(v)-1]['uuid'] for v in answer)); break
-            say('  Введите номера из списка через пробел или нажмите Enter.','error')
+        grants[p]=ui.multi_select('Сквады для '+LABELS[p]+'; пусто — настрою в панели',
+                                 [(s['uuid'],s['name']) for s in all_squads],[])
     # Omitting Yggdrasil means leave it alone, including the saved SSH/access state.
     allowed=old.get('allowed',[]); ssh_allowed=old.get('ssh_allowed',[]); ssh_enabled=old.get('ssh',False)
     access_mode=old.get('access_mode','restricted' if allowed else 'subscription')
@@ -182,11 +177,15 @@ def main():
         option(2,'По подписке и списку IP','дополнительное ограничение устройств')
         access_mode=args.access_mode or ('restricted' if args.allow_ip else access_mode)
         if not args.yes and not args.access_mode and not args.allow_ip:
-            while True:
-                answer=prompt('Режим доступа к VPN','1' if access_mode=='subscription' else '2')
-                if answer in ('1','2'):
-                    access_mode='subscription' if answer=='1' else 'restricted'; break
-                say('  Введите 1 или 2.','error')
+            if ui.fullscreen():
+                access_mode=ui.screen.select('Режим доступа к VPN',[
+                    ('subscription','По подписке — без списка IP'),('restricted','По подписке и списку IP')],access_mode)
+            else:
+                while True:
+                    answer=prompt('Режим доступа к VPN','1' if access_mode=='subscription' else '2')
+                    if answer in ('1','2'):
+                        access_mode='subscription' if answer=='1' else 'restricted'; break
+                    say('  Введите 1 или 2.','error')
         if access_mode=='subscription':
             allowed=[]
             say('  IP клиентов не ограничиваются. Нужны рабочая сеть Yggdrasil\n  и действующая VPN-учётная запись с доступом к этому inbound.','success')
@@ -276,6 +275,7 @@ def main():
             key=key or cert.parent/'privkey.pem'
             pair=certificates.validate(cert,key,source.address)
         field('Сертификат проверен',str(pair.cert))
+    ui.page('7 · План применения')
     frame('ПЛАН ПРИМЕНЕНИЯ',[(selected.name+' · '+selected.address,'value'),('Профиль: '+profile['name'],'text')])
     for p,tag in mapping.items():
         names=[s['name'] for s in all_squads if s['uuid'] in grants[p]]
@@ -302,6 +302,7 @@ def main():
     if args.check: say('\n  Проверка завершена. План корректен; рабочие настройки не применялись.','success'); return
     if not args.yes and not confirm('Применить показанный план?'):
         say('  Отменено. Рабочие настройки не применялись.','warning'); return
+    ui.begin_apply()
     local.BASE.mkdir(parents=True,exist_ok=True,mode=0o700); local.BASE.chmod(0o700)
     import fcntl
     with (local.BASE/'install.lock').open('w') as lock:
@@ -371,7 +372,9 @@ def main():
 
 if __name__=='__main__':
     os.umask(0o077); os.environ['LC_ALL']='C'
-    try: main()
+    try:
+        from screen import available,launch
+        if not available(sys.argv[1:]) or not launch(main,result,VERSION,sys.argv[1:]): main()
     except (Error,OSError,ValueError,KeyError,subprocess.SubprocessError) as exc:
         say('\n  Установка остановлена: '+str(exc),'error')
         say('  До подтверждения плана рабочие настройки не применяются. Если ошибка\n  возникла после подтверждения, часть шагов могла завершиться. Исправьте\n  указанную причину и повторите запуск: существующие Host не дублируются.','warning')

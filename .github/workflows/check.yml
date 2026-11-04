@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          python3 -m compileall -q api.py main.py node.py probe.py multi.py converter.py provision.py certificates.py desktop.py ui.py
+          python3 -m compileall -q api.py main.py node.py probe.py multi.py converter.py provision.py certificates.py desktop.py ui.py screen.py
           bash -n install.sh tests/smoke.sh
           python3 main.py --help
           python3 multi.py --help

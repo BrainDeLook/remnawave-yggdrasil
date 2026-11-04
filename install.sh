@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 umask 077
-VERSION=v0.2.4
-BUNDLE_SHA256=401f3074aaaa58e121903c4fab5f7f29a545bb1ee5a4049c7de25acd5cb313c8
+VERSION=v0.3.0
+BUNDLE_SHA256=de5830b4f4bb0c9a8da53f1bf3fcd9daf6ec59d6a2ba4383dbe3a045ba1cb294
 URL="https://github.com/BrainDeLook/remnawave-yggdrasil/releases/download/$VERSION/remnawave-yggdrasil-$VERSION.tar"
 color_section='' color_text='' color_error='' color_reset=''
 if [[ -t 1 && ${TERM:-} != dumb && ! -v NO_COLOR ]]; then
@@ -32,5 +32,5 @@ printf '\n%sRemnawave · дополнительные протоколы · %s%s
 printf 'Загружаю проверенную сборку. Затем откроется мастер настройки.\n'
 curl -fsSL --retry 3 --connect-timeout 20 --max-time 180 --proto '=https' --proto-redir '=https' "$URL" -o "$scratch/bundle.tar"
 printf '%s  %s\n' "$BUNDLE_SHA256" "$scratch/bundle.tar" | sha256sum -c --status || { printf '%sКонтрольная сумма не совпала. Установка остановлена.%s\n' "$color_error" "$color_reset"; exit 1; }
-tar -xf "$scratch/bundle.tar" -C "$scratch" main.py api.py node.py probe.py multi.py converter.py provision.py certificates.py ui.py
+tar -xf "$scratch/bundle.tar" -C "$scratch" main.py api.py node.py probe.py multi.py converter.py provision.py certificates.py ui.py screen.py
 python3 "$scratch/multi.py" "$@"

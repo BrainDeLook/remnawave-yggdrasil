@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+from typing import Callable
 from api import Error
 
 BASE = Path('/etc/remnawave-yggdrasil')
@@ -23,12 +24,16 @@ YGG_HASHES = {'amd64':'72745496b09baa1c3f5a6741e1257a704cfdb9d00cdf3ddbef025987b
               'arm64':'ac8c9a9a76c54b878fd251aef5a2bbd20375c6109b28b32435683441462360c9'}
 PEERS = ['tls://nl1.route172.de:443?key=000000002643ae27bad63e2a81f1d30554ce9ea634f5990062a9e079e23593cd',
          'tls://cirno.nadeko.net:44442','tls://vpn.itrus.su:7992']
+command_log: Callable[[str],None] | None = None
 
 def run(*args: str, input: str | bytes | None = None, timeout: int = 90, check: bool = True) -> str:
     result = subprocess.run(args, input=input, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=not isinstance(input, bytes), timeout=timeout)
     out = result.stdout.decode() if isinstance(result.stdout, bytes) else result.stdout
     err = result.stderr.decode(errors='replace') if isinstance(result.stderr, bytes) else result.stderr
+    # Never log docker inspect (contains SECRET_KEY) or arbitrary command output.
+    if command_log is not None and args[0] in ('apt-get','modprobe','ufw','systemctl'):
+        command_log(shlex.join(args)+'\n'+out+err)
     if check and result.returncode:
         # Commands here contain paths/ports only; API credentials never enter argv.
         raise Error(f'{args[0]}: {err.strip()[-1200:] or "операция не выполнена"}')
