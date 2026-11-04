@@ -12,6 +12,7 @@ def fixture(argv):
     ui.section(2,'Авторизация')
     token=ui.secret('API-токен')
     assert token=='PTY_PRIVATE_TOKEN'
+    assert ui.prompt('Общее имя')=='🇳🇱 Нидерланды'
     ui.section(3,'Выбор протоколов')
     ui.multi_select('Дополнения',[('ygg','Yggdrasil')],[],allow_empty=False)
     ui.section(4,'План')

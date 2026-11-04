@@ -26,7 +26,9 @@ FILES=('api.py','main.py','node.py','probe.py','multi.py','converter.py','provis
 
 def result():
     ui.page('Сохранённые подключения')
-    state=json.loads((local.BASE/'multi-state.json').read_text())
+    path=local.BASE/'multi-state.json'
+    if not path.exists(): raise Error('Сохранённых подключений пока нет. Сначала выберите установку дополнительных протоколов.')
+    state=json.loads(path.read_text())
     frame('УСТАНОВКА ЗАВЕРШЕНА',[(state['name'],'success'),('Ниже — сохранённые настройки этой ноды.','text')],'success')
     field('Профиль в панели',state['profile'])
     for host in state['hosts']:

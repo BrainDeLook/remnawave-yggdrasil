@@ -150,6 +150,7 @@ class PtyTests(unittest.TestCase):
                 expect('API-токен'); send('PTY_PRIVATE_TOKEN')
                 fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',22,80,0,0))
                 os.kill(process.pid,signal.SIGWINCH); send('\n')
+                expect('Общее имя'); send('🇳🇱 Нидерланды\n')
                 expect('Дополнения'); send(' \n')
                 expect('Применить план?'); send('\x1bOA\n')
                 expect('Готово'); send('\n')
