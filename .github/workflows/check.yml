@@ -13,8 +13,6 @@ jobs:
       - run: |
           python3 -m compileall -q api.py main.py node.py probe.py multi.py converter.py provision.py certificates.py desktop.py ui.py screen.py
           bash -n install.sh tests/smoke.sh
-          python3 -m py_compile tools/ip-migrate/migrate.py
-          bash -n tools/ip-migrate/install.sh
           python3 main.py --help
           python3 multi.py --help
           python3 build.py
