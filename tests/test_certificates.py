@@ -190,6 +190,14 @@ class CertificateCoexistenceTests(unittest.TestCase):
                 config['listeners']=[dict(protocol=udp.protocol,address=udp.address,port=udp.port)]
                 state.write_text(json.dumps(config));sync()
                 restart.assert_called_once_with((443,),saved_listeners=frozenset({udp}))
+                restart.reset_mock()
+                # A deliberately stopped node with intact files stays stopped.
+                sync();restart.assert_not_called()
+                # Xray may be visible but still missing listeners during boot.
+                (root/'target-key').unlink();restart.reset_mock()
+                with patch('certificates.core_snapshot',return_value=Core(0,0,self.listeners)):
+                    sync()
+                restart.assert_called_once_with((443,),saved_listeners=self.listeners|{udp})
             self.assertEqual((root/'target-key').read_text(),'key')
             self.assertFalse(json.loads(state.read_text())['restart_pending'])
 

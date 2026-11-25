@@ -132,9 +132,18 @@ def _sync_locked():
         pair=validate(cert,key,config.get('domain'))
     if pair.expires_at-time.time()<7*86400:
         say('  Сертификат Hysteria2 истекает менее чем через 7 дней. Проверьте автопродление Certbot/Caddy.','warning')
+    targets=[];missing=False
+    for key,destination,mode in (('cert',config.get('cert_target',LEGACY_CERT_TARGET),0o644),
+                                 ('key',config.get('key_target',LEGACY_KEY_TARGET),0o600)):
+        target=Path(destination)
+        if target.is_symlink(): raise Error('Путь сертификата /dev/shm занят символической ссылкой')
+        absent=not target.exists();missing=missing or absent
+        targets.append((key,target,mode,absent or target.read_bytes()!=contents[key]))
+    changed=any(different for key,target,mode,different in targets)
     core=core_snapshot()
     saved=frozenset(Listener(**value) for value in config.get('listeners',[]))
     pending=config.get('restart_pending',False)
+    restoring=missing and bool(saved)
     if core is not None:
         if core.effective_uid!=0 or core.filesystem_uid!=0:
             raise Error('Процесс rw-core/Xray работает не от root; ключ 600 ему недоступен. Права 644 не применяются.')
@@ -145,27 +154,21 @@ def _sync_locked():
             udp_ports=[host['port'] for host in hosts if host['protocol']=='hy2']
         live=frozenset(listener for listener in core.listeners
                        if listener.protocol.startswith('tcp') or listener.port in udp_ports)
-        if not pending and any(l.protocol.startswith('udp') for l in saved) and not set(udp_ports)<={
+        if not (pending or restoring) and any(l.protocol.startswith('udp') for l in saved) and not set(udp_ports)<={
                 l.port for l in live if l.protocol.startswith('udp')}:
             raise Error('У rw-core/Xray отсутствует настроенный UDP-порт Hysteria2. Если порт изменён в панели, повторите настройку установщиком; сохранённые слушатели не менялись.')
-        saved=saved|live if pending else live
+        saved=saved|live if pending or restoring else live
         if not saved: raise Error('Не удалось определить слушатели rw-core/Xray до настройки сертификата')
         config['udp_ports']=udp_ports
         config['listeners']=[dict(protocol=l.protocol,address=l.address,port=l.port)
                              for l in sorted(saved,key=lambda l:(l.protocol,l.address,l.port))]
     elif not saved:
         raise Error('Процесс rw-core/Xray не найден и нет сохранённой проверки слушателей. Запустите ноду и повторите настройку; сертификат не менялся.')
-    targets=[('cert',Path(config.get('cert_target',LEGACY_CERT_TARGET)),0o644),
-             ('key',Path(config.get('key_target',LEGACY_KEY_TARGET)),0o600)]
-    changed=False
-    for key,target,mode in targets:
-        if target.is_symlink(): raise Error('Путь сертификата /dev/shm занят символической ссылкой')
-        changed=changed or not target.exists() or target.read_bytes()!=contents[key]
-    config['restart_pending']=pending or changed or core is None
+    config['restart_pending']=pending or changed
     write(BASE/'cert-sync.json',json.dumps(config))
-    for key,target,mode in targets:
+    for key,target,mode,different in targets:
         content=contents[key]
-        if not target.exists() or target.read_bytes()!=content:
+        if different:
             # /dev/shm is shared and writable: a predictable .new filename could be
             # planted as a symlink. Create our own 0600 file and replace atomically.
             with tempfile.NamedTemporaryFile(dir=target.parent,prefix='.remna-hy2-',delete=False) as temporary:
