@@ -19,9 +19,10 @@ from ui import say, prompt, choose, access, section, field, option, panel as fra
 import node as local
 import certificates
 import provision
+from certificate_runtime import require_root_core
 
-VERSION='0.3.7'
-FILES=('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py','ui.py','screen.py')
+VERSION='0.3.8'
+FILES=('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py','certificate_sources.py','certificate_runtime.py','ui.py','screen.py')
 
 
 def result(*, after_install=False):
@@ -258,7 +259,7 @@ def main(argv=None):
         listeners=local.run('ss','-H','-lnu' if protocol=='hy2' else '-lnt')
         if any(len(parts:=line.split())>=4 and parts[3].rpartition(':')[2]==str(port) for line in listeners.splitlines()):
             raise Error(f'Порт {port} уже слушает другой сервис. Настройки ещё не менялись; выберите другой порт/профиль.')
-    cert=args.cert; key=args.key; certificate_managed=False; retire_cert_writer=False
+    cert=args.cert; key=args.key; pair=None; certificate_managed=False; retire_cert_writer=False
     cert_targets=(certificates.CERT_TARGET,certificates.KEY_TARGET)
     if 'hy2' in protocols:
         hy2=raw_by_tag[mapping['hy2']]
@@ -285,26 +286,28 @@ def main(argv=None):
         if certificate_managed:
             if not any(m['Destination']=='/dev/shm' and m['Source']=='/dev/shm' and m['RW'] for m in docker['Mounts']):
                 raise Error('Для нового Hysteria2 требуется общий доступный для записи /dev/shm:/dev/shm в Compose ноды')
-            if docker['Config'].get('User') not in ('','0','root','0:0'):
-                raise Error('Новый Hysteria2: эта версия ожидает root внутри контейнера для чтения ключа 600')
+            require_root_core()
             if not cert:
                 section(5,'Сертификат для Hysteria2')
-                say('  Проверяю существующие сертификаты Certbot. Мастер выберет тот,\n  который подходит домену Host и ещё действует.')
+                say('  Проверяю сертификаты Certbot и Caddy. Мастер выберет тот,\n  который подходит домену Host и ещё действует.')
                 field('Домен Host',source.address)
                 detected=certificates.discover(source.address)
                 if detected:
-                    cert,detected_key=detected
-                    key=key or detected_key
+                    cert=detected.cert
+                    if not key: pair=detected
+                    key=key or detected.key
                     field('Сертификат найден',str(cert))
             if not cert and not args.yes:
                 say('  Подходящий действующий сертификат автоматически не найден.','warning')
-                say('  Он нужен только Hysteria2. Для VLESS Reality через Yggdrasil\n  TLS-сертификат не требуется. Если сертификат хранится вне Certbot,\n  введите путь к fullchain.pem. Имя папки может отличаться от домена.\n  Подойдёт сертификат этого домена или соответствующий wildcard.')
+                say('  Он нужен только Hysteria2. Для VLESS Reality через Yggdrasil\n  TLS-сертификат не требуется. Если сертификат не найден автоматически,\n  введите путь к fullchain.pem. Имя папки может отличаться от домена.\n  Подойдёт сертификат этого домена или соответствующий wildcard.')
                 say('  Пример: /etc/letsencrypt/live/example.com/fullchain.pem','example')
                 cert=Path(prompt('Путь к полному сертификату'))
             if not cert: raise Error('Укажите --cert и --key для Hysteria2')
             key=key or cert.parent/'privkey.pem'
-            pair=certificates.validate(cert,key,source.address)
+            pair=pair or certificates.validate(cert,key,source.address)
         field('Сертификат проверен',str(pair.cert))
+        if pair.expires_at-time.time()<7*86400:
+            say('  Сертификат истекает менее чем через 7 дней. Проверьте автопродление Certbot/Caddy.','warning')
     ui.page('6 · План применения')
     frame('ПЛАН ПРИМЕНЕНИЯ',[(selected.name+' · '+selected.address,'value'),('Профиль: '+profile['name'],'text')])
     for p,tag in mapping.items():
@@ -366,7 +369,7 @@ def main(argv=None):
         ufw=bool(shutil.which('ufw') and 'Status: active' in local.run('ufw','status'))
         for p,tag in mapping.items():
             if p!='ygg' and ufw: local.run('ufw','allow',str(raw_by_tag[tag]['port'])+('/udp' if p=='hy2' else '/tcp'))
-        if certificate_managed: certificates.setup(pair,*cert_targets)
+        if certificate_managed: certificates.setup(pair,*cert_targets,udp_port=raw_by_tag[mapping['hy2']]['port'])
         elif retire_cert_writer:
             local.run('systemctl','disable','--now','remna-hy2-certs.timer')
             local.run('systemctl','stop','remna-hy2-certs.service')
@@ -398,6 +401,7 @@ def main(argv=None):
                 except OSError:
                     if attempt==29: raise Error('Не появился слушатель '+tag+'. Проверьте журнал ноды и профиль; уже созданные настройки сохранены.') from None
                     time.sleep(2)
+        if certificate_managed: certificates.remember_runtime()
         state.update(verification='listeners',checked_protocols=[p for p in mapping if p!='hy2'],
                      checked_at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'))
         local.write(local.BASE/'multi-state.json',json.dumps(state,ensure_ascii=False,indent=2))

@@ -1,15 +1,18 @@
 """Selected Hysteria2 certificate copy, boot/renewal sync; no world-readable key."""
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 import posixpath
 import re
 import ssl
-import subprocess
 import tempfile
 import time
 from api import Error
+from certificate_sources import caddy_candidates
+from certificate_runtime import Listener, core_snapshot, restart_and_wait
+from ui import say
 from node import APP, BASE, run, write
 
 CERT_TARGET = Path('/dev/shm/remna-ygg-hy2-cert.pem')
@@ -23,6 +26,7 @@ class CertificatePair:
     cert: Path
     key: Path
     domain: str | None
+    expires_at: float
 
 
 def validate(cert: Path, key: Path, domain: str | None = None) -> CertificatePair:
@@ -42,27 +46,25 @@ def validate(cert: Path, key: Path, domain: str | None = None) -> CertificatePai
     if not public: raise Error('Не удалось прочитать публичный ключ сертификата')
     key_public=run('openssl','pkey','-in',str(key),'-pubout')
     if public[0].strip()!=key_public.strip(): raise Error('Сертификат Hysteria2 и приватный ключ не образуют пару')
-    return CertificatePair(cert,key,domain)
+    return CertificatePair(cert,key,domain,ssl.cert_time_to_seconds(dates['notAfter']))
 
 
-def discover(domain: str, root: Path = Path('/etc/letsencrypt/live')) -> tuple[Path,Path] | None:
-    """Match certificate contents, not Certbot's directory/lineage name."""
+def discover(domain: str, root: Path | None = None) -> CertificatePair | None:
+    """Validate filesystem candidates once; retain live paths for future renewals."""
+    live=root if root is not None else Path('/etc/letsencrypt/live')
+    candidates=[(cert,cert.parent/'privkey.pem') for cert in sorted(live.glob('*/fullchain.pem'))]
+    if root is None: candidates.extend(caddy_candidates(domain))
     matches=[]
-    for cert in sorted(root.glob('*/fullchain.pem')):
-        key=cert.parent/'privkey.pem'
+    for cert,key in dict.fromkeys(candidates):
         if not cert.is_file() or not key.is_file(): continue
-        checked=subprocess.run(['openssl','x509','-in',str(cert),'-noout','-checkhost',domain,
-                                '-enddate'],capture_output=True,text=True,timeout=10)
-        if checked.returncode or 'does match certificate' not in checked.stdout: continue
-        expiry=next((line.removeprefix('notAfter=') for line in checked.stdout.splitlines() if line.startswith('notAfter=')),None)
-        if expiry:
-            deadline=ssl.cert_time_to_seconds(expiry)
-            if deadline>time.time(): matches.append((deadline,str(cert),cert,key))
-    if not matches: return None
-    # Prefer the longest-lived valid certificate, retaining the stable live symlink
-    # so the existing renewal mechanism continues to work.
-    selected=max(matches)
-    return selected[2],selected[3]
+        try:
+            pair=validate(cert,key,domain)
+        except Error:
+            # Candidates can belong to other domains/issuers or be mid-renewal.
+            # A bad candidate must not hide a valid pair from another source.
+            continue
+        matches.append(pair)
+    return max(matches,key=lambda pair:(pair.expires_at,str(pair.cert))) if matches else None
 
 
 def configured_targets(inbound: dict) -> tuple[PurePosixPath, PurePosixPath]:
@@ -102,17 +104,67 @@ def managed_targets() -> tuple[Path, Path] | None:
     return Path(config.get('cert_target', LEGACY_CERT_TARGET)), Path(config.get('key_target', LEGACY_KEY_TARGET))
 
 
+@contextmanager
+def certificate_lock():
+    import fcntl
+    # A renewal timer and an installer must not interleave certificate pairs.
+    with (BASE/'cert-sync.lock').open('w') as lock:
+        try:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise Error('Сертификат Hysteria2 уже обновляется другим запуском. Повторите позже.') from exc
+        yield
+
+
 def sync():
+    with certificate_lock():
+        _sync_locked()
+
+
+def _sync_locked():
     config=json.loads((BASE/'cert-sync.json').read_text())
-    # Renewal replaces source files independently of the installer; validate this read.
-    validate(Path(config['cert']),Path(config['key']),config.get('domain'))
+    # Certbot/Caddy can replace source files during this read. Validate the exact
+    # snapshot we will install; a mixed renewal pair fails before any target write.
+    contents={key:Path(config[key]).read_bytes() for key in ('cert','key')}
+    with tempfile.TemporaryDirectory(prefix='remna-hy2-check-') as directory:
+        cert=Path(directory)/'certificate.pem';key=Path(directory)/'private-key.pem'
+        cert.write_bytes(contents['cert']);key.write_bytes(contents['key']);key.chmod(0o600)
+        pair=validate(cert,key,config.get('domain'))
+    if pair.expires_at-time.time()<7*86400:
+        say('  Сертификат Hysteria2 истекает менее чем через 7 дней. Проверьте автопродление Certbot/Caddy.','warning')
+    core=core_snapshot()
+    saved=frozenset(Listener(**value) for value in config.get('listeners',[]))
+    pending=config.get('restart_pending',False)
+    if core is not None:
+        if core.effective_uid!=0 or core.filesystem_uid!=0:
+            raise Error('Процесс rw-core/Xray работает не от root; ключ 600 ему недоступен. Права 644 не применяются.')
+        udp_ports=config.get('udp_ports')
+        if udp_ports is None:
+            state=BASE/'multi-state.json'
+            hosts=json.loads(state.read_text()).get('hosts',[]) if state.exists() else []
+            udp_ports=[host['port'] for host in hosts if host['protocol']=='hy2']
+        live=frozenset(listener for listener in core.listeners
+                       if listener.protocol.startswith('tcp') or listener.port in udp_ports)
+        if not pending and any(l.protocol.startswith('udp') for l in saved) and not set(udp_ports)<={
+                l.port for l in live if l.protocol.startswith('udp')}:
+            raise Error('У rw-core/Xray отсутствует настроенный UDP-порт Hysteria2. Если порт изменён в панели, повторите настройку установщиком; сохранённые слушатели не менялись.')
+        saved=saved|live if pending else live
+        if not saved: raise Error('Не удалось определить слушатели rw-core/Xray до настройки сертификата')
+        config['udp_ports']=udp_ports
+        config['listeners']=[dict(protocol=l.protocol,address=l.address,port=l.port)
+                             for l in sorted(saved,key=lambda l:(l.protocol,l.address,l.port))]
+    elif not saved:
+        raise Error('Процесс rw-core/Xray не найден и нет сохранённой проверки слушателей. Запустите ноду и повторите настройку; сертификат не менялся.')
+    targets=[('cert',Path(config.get('cert_target',LEGACY_CERT_TARGET)),0o644),
+             ('key',Path(config.get('key_target',LEGACY_KEY_TARGET)),0o600)]
     changed=False
-    for key,destination,mode in (('cert',config.get('cert_target',str(LEGACY_CERT_TARGET)),0o644),
-                                 ('key',config.get('key_target',str(LEGACY_KEY_TARGET)),0o600)):
-        source=Path(config[key]); target=Path(destination)
-        if not source.is_file(): raise Error('Нет файла сертификата для Hysteria2: '+str(source))
+    for key,target,mode in targets:
         if target.is_symlink(): raise Error('Путь сертификата /dev/shm занят символической ссылкой')
-        content=source.read_bytes()
+        changed=changed or not target.exists() or target.read_bytes()!=contents[key]
+    config['restart_pending']=pending or changed or core is None
+    write(BASE/'cert-sync.json',json.dumps(config))
+    for key,target,mode in targets:
+        content=contents[key]
         if not target.exists() or target.read_bytes()!=content:
             # /dev/shm is shared and writable: a predictable .new filename could be
             # planted as a symlink. Create our own 0600 file and replace atomically.
@@ -120,16 +172,41 @@ def sync():
                 os.fchmod(temporary.fileno(),mode)
                 temporary.write(content)
             os.replace(temporary.name,target)
-            changed=True
         target.chmod(mode)
-    if changed: run('docker','restart','remnanode',timeout=120)
+    if config['restart_pending']:
+        restart_and_wait(tuple(config.get('udp_ports',[])),saved_listeners=saved)
+        config['restart_pending']=False
+        write(BASE/'cert-sync.json',json.dumps(config))
 
 
-def setup(pair: CertificatePair, cert_target: Path = CERT_TARGET, key_target: Path = KEY_TARGET):
+def remember_runtime():
+    """Persist the applied core's listeners for recovery after tmpfs is cleared."""
+    with certificate_lock():
+        _remember_runtime_locked()
+
+
+def _remember_runtime_locked():
+    config=json.loads((BASE/'cert-sync.json').read_text())
+    ports=config['udp_ports']
+    deadline=time.monotonic()+60
+    while True:
+        core=core_snapshot()
+        if core is not None:
+            if core.effective_uid!=0 or core.filesystem_uid!=0:
+                raise Error('Не удалось подтвердить root-процесс rw-core/Xray после применения Hysteria2')
+            if set(ports)<={l.port for l in core.listeners if l.protocol.startswith('udp')}: break
+        if time.monotonic()>=deadline:
+            raise Error('После применения не появился UDP-слушатель Hysteria2 у процесса rw-core/Xray за 60 секунд')
+        time.sleep(2)
+    config['listeners']=[dict(protocol=l.protocol,address=l.address,port=l.port)
+                         for l in sorted(core.listeners,key=lambda l:(l.protocol,l.address,l.port))
+                         if l.protocol.startswith('tcp') or l.port in ports]
+    write(BASE/'cert-sync.json',json.dumps(config))
+
+
+def setup(pair: CertificatePair, cert_target: Path = CERT_TARGET, key_target: Path = KEY_TARGET, *, udp_port: int):
     if cert_target.parent != Path('/dev/shm') or key_target.parent != Path('/dev/shm') or cert_target == key_target:
         raise Error('Назначение сертификата Hysteria2 должно быть отдельной парой файлов в /dev/shm')
-    write(BASE/'cert-sync.json',json.dumps({'cert':str(pair.cert),'key':str(pair.key),'domain':pair.domain,
-                                        'cert_target':str(cert_target),'key_target':str(key_target)}))
     write(Path('/etc/systemd/system/remna-hy2-certs.service'),f'''[Unit]
 Description=Remnanode Hysteria2 certificate sync
 After=docker.service
@@ -146,6 +223,9 @@ OnUnitActiveSec=1h
 [Install]
 WantedBy=timers.target
 ''',0o644)
-    sync()
+    with certificate_lock():
+        write(BASE/'cert-sync.json',json.dumps({'cert':str(pair.cert),'key':str(pair.key),'domain':pair.domain,
+                                            'cert_target':str(cert_target),'key_target':str(key_target),'udp_ports':[udp_port]}))
+        _sync_locked()
     run('systemctl','daemon-reload')
     run('systemctl','enable','--now','remna-hy2-certs.timer')

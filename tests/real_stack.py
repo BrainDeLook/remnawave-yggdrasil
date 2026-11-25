@@ -289,10 +289,33 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         cert=ROOT/'.test-bin/hy2-cert.pem'; certkey=ROOT/'.test-bin/hy2-key.pem'
         run('openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=127.0.0.1',
             '-addext','subjectAltName=DNS:127.0.0.1,IP:127.0.0.1','-keyout',str(certkey),'-out',str(cert))
-        # Certbot lineage name deliberately differs from Host; no manual paths supplied.
+        # Preserve real Certbot discovery coverage before exercising Caddy-only storage.
         lineage=Path('/etc/letsencrypt/live/ci-different-name-0001'); lineage.mkdir(parents=True,mode=0o700)
         (lineage/'fullchain.pem').write_bytes(cert.read_bytes())
         (lineage/'privkey.pem').write_bytes(certkey.read_bytes())
+        from certificates import discover
+        found=discover('127.0.0.1',Path('/etc/letsencrypt/live'))
+        assert found is not None and found.cert==lineage/'fullchain.pem'
+        # Wrong-domain Certbot and first-CA candidates must never shadow Caddy's matching pair.
+        wrong_cert=ROOT/'.test-bin/wrong-cert.pem'; wrong_key=ROOT/'.test-bin/wrong-key.pem'
+        run('openssl','req','-x509','-newkey','ec','-pkeyopt','ec_paramgen_curve:prime256v1',
+            '-nodes','-days','1','-subj','/CN=wrong.example.com',
+            '-addext','subjectAltName=DNS:wrong.example.com','-keyout',str(wrong_key),'-out',str(wrong_cert))
+        (lineage/'fullchain.pem').write_bytes(wrong_cert.read_bytes())
+        (lineage/'privkey.pem').write_bytes(wrong_key.read_bytes())
+        caddy_data=ROOT/'.test-bin/caddy-storage'
+        caddy_wrong=caddy_data/'caddy/certificates/first-ca/wrong-domain'
+        caddy_match=caddy_data/'caddy/certificates/second-ca/renamed-lineage'
+        caddy_wrong.mkdir(parents=True); caddy_match.mkdir(parents=True)
+        (caddy_wrong/'wrong-domain.crt').write_bytes(wrong_cert.read_bytes())
+        (caddy_wrong/'wrong-domain.key').write_bytes(wrong_key.read_bytes())
+        caddy_cert=caddy_match/'unexpected-name.crt'; caddy_key=caddy_match/'unexpected-name.key'
+        caddy_cert.write_bytes(cert.read_bytes()); caddy_key.write_bytes(certkey.read_bytes())
+        # The fixture tests actual Docker mount inspection, not a mocked storage location.
+        # No CA issuance or network listener is needed for this read-only storage contract.
+        run('docker','run','-d','--name','caddy-remnawave','--entrypoint','sh',
+            '-v',str(caddy_data)+':/data:ro','caddy:2','-c','sleep 1800',timeout=300)
+        caddy_before=run('docker','inspect','--format','{{.Id}} {{.State.StartedAt}}','caddy-remnawave')
         upstream_cert=Path('/dev/shm/hysteria_cert.pem'); upstream_key=Path('/dev/shm/hysteria_key.pem')
         upstream_cert.write_bytes(cert.read_bytes()); upstream_key.write_bytes(certkey.read_bytes())
         upstream_key.chmod(0o600)
@@ -303,6 +326,12 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
                     '--allow-ip','200:db8::111','--allow-ip','200:db8::333',
                     '--allow-ip','300:db8:1:1::/64',
                     '--peer',f'tcp://127.0.0.1:{peer_port}']
+        from certificate_runtime import core_snapshot, require_root_core
+        require_root_core()
+        running_core=core_snapshot()
+        assert running_core is not None and running_core.effective_uid==running_core.filesystem_uid==0
+        assert any(l.protocol.startswith('tcp') and l.port==443 for l in running_core.listeners)
+        print('PASS actual rw-core identity and owned TCP listener checked before certificate writes',flush=True)
         squad_before=api.request('GET','/internal-squads/'+squad['uuid'])
         subprocess.run(multi_args,check=True)
         assert api.request('GET','/internal-squads/'+squad['uuid'])==squad_before
@@ -319,7 +348,7 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         api.request('PATCH','/internal-squads',{'uuid':squad['uuid'],
                     'inbounds':[i['uuid'] for i in installed['inbounds']]})
         state=json.loads(Path('/etc/remnawave-yggdrasil/multi-state.json').read_text())
-        assert json.loads(Path('/etc/remnawave-yggdrasil/cert-sync.json').read_text())['cert']==str(lineage/'fullchain.pem')
+        assert json.loads(Path('/etc/remnawave-yggdrasil/cert-sync.json').read_text())['cert']==str(caddy_cert)
         assert (upstream_cert.read_bytes(),upstream_key.read_bytes())==upstream_before
         actual=api.request('GET','/config-profiles/'+profile['uuid'])
         assert len(actual['config']['inbounds'])==5
@@ -335,6 +364,7 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         names=[urllib.parse.unquote(link.fragment) for link in parsed]
         assert all(h['name'] in names for h in state['hosts'])
         # Test the same user-specific transport parameters the normal subscription exposes.
+        transport_outbounds={}
         for host in state['hosts']:
             protocol=host['protocol']
             if protocol=='ygg': continue
@@ -354,8 +384,55 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
                 if protocol=='xhttp': stream['xhttpSettings']={'path':params['path'][0],'mode':'auto'}
                 outbound={'protocol':'vless','settings':{'vnext':[{'address':'127.0.0.1','port':host['port'],
                               'users':[{'id':urllib.parse.unquote(link.username),'encryption':'none'}]}]},'streamSettings':stream}
+            transport_outbounds[protocol]=outbound
             verify(public_client,outbound_override=outbound)
             print('PASS HTTPS through subscribed '+protocol+' transport',flush=True)
+        print('PASS Caddy discovery: actual read-only Docker mount, multiple CAs and renamed certificate; wrong-domain Certbot ignored',flush=True)
+        # A real renewal must restore every listener before the sync command returns.
+        run('systemctl','stop','remna-hy2-certs.timer')
+        wait(lambda: run('systemctl','is-active','remna-hy2-certs.service',check=False).strip() not in ('active','activating','deactivating'))
+        started=run('docker','inspect','--format','{{.State.StartedAt}}','remnanode')
+        run('openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','2','-subj','/CN=127.0.0.1',
+            '-addext','subjectAltName=DNS:127.0.0.1,IP:127.0.0.1','-keyout',str(certkey),'-out',str(cert))
+        caddy_cert.write_bytes(cert.read_bytes()); caddy_key.write_bytes(certkey.read_bytes())
+        subprocess.run([sys.executable,str(ROOT/'multi.py'),'--sync-certs'],check=True)
+        renewed=run('docker','inspect','--format','{{.State.StartedAt}}','remnanode')
+        assert renewed!=started,'Changed certificate did not restart the local node'
+        assert Path('/dev/shm/remna-ygg-hy2-cert.pem').read_bytes()==cert.read_bytes()
+        assert Path('/dev/shm/remna-ygg-hy2-key.pem').read_bytes()==certkey.read_bytes()
+        assert Path('/dev/shm/remna-ygg-hy2-key.pem').stat().st_mode & 0o077==0
+        verify(public_client)
+        verify(export(ygg_raw,dict(source,address=address,port=1488),user)[1])
+        for outbound in transport_outbounds.values():
+            verify(public_client,outbound_override=outbound)
+        subprocess.run([sys.executable,str(ROOT/'multi.py'),'--sync-certs'],check=True)
+        assert run('docker','inspect','--format','{{.State.StartedAt}}','remnanode')==renewed
+        # A cold boot clears /dev/shm before Xray can read its TLS files. The
+        # private saved root/listener snapshot must allow restoring only our pair.
+        remembered=json.loads(Path('/etc/remnawave-yggdrasil/cert-sync.json').read_text())
+        assert any(l['protocol'].startswith('udp') and l['port']==443 for l in remembered['listeners'])
+        run('docker','stop','remnanode',timeout=120)
+        assert core_snapshot() is None
+        for target in (Path('/dev/shm/remna-ygg-hy2-cert.pem'),Path('/dev/shm/remna-ygg-hy2-key.pem')):
+            assert target.parent==Path('/dev/shm') and target.name in ('remna-ygg-hy2-cert.pem','remna-ygg-hy2-key.pem')
+            target.unlink()
+        subprocess.run([sys.executable,str(ROOT/'multi.py'),'--sync-certs'],check=True)
+        restored=core_snapshot()
+        assert restored is not None and restored.effective_uid==restored.filesystem_uid==0
+        assert Path('/dev/shm/remna-ygg-hy2-cert.pem').read_bytes()==cert.read_bytes()
+        assert Path('/dev/shm/remna-ygg-hy2-key.pem').read_bytes()==certkey.read_bytes()
+        assert Path('/dev/shm/remna-ygg-hy2-key.pem').stat().st_mode & 0o077==0
+        verify(public_client)
+        verify(export(ygg_raw,dict(source,address=address,port=1488),user)[1])
+        for outbound in transport_outbounds.values():
+            verify(public_client,outbound_override=outbound)
+        print('PASS cold certificate restore: stopped core and missing owned tmpfs pair recover TCP/UDP HTTPS with key 600',flush=True)
+        assert run('docker','inspect','--format','{{.Id}} {{.State.StartedAt}}','caddy-remnawave')==caddy_before
+        assert (upstream_cert.read_bytes(),upstream_key.read_bytes())==upstream_before
+        assert (lineage/'fullchain.pem').read_bytes()==wrong_cert.read_bytes()
+        verify_neighbours()
+        run('systemctl','start','remna-hy2-certs.timer')
+        print('PASS certificate renewal: TCP and UDP HTTPS restored, private key 600, unchanged sync skips restart, Caddy and neighbours untouched',flush=True)
         # A distinct squad with only the old inbound must not acquire any new inbound.
         assert len(api.request('GET','/internal-squads/'+other['uuid'])['inbounds'])==1
         own=api.request('GET','/internal-squads/'+squad['uuid'])
