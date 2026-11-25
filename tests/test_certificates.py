@@ -225,7 +225,10 @@ class CertificateCoexistenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);cert=root/'cert';key=root/'key'
             cert.write_text('cert');key.write_text('key')
+            target_cert=root/'target-cert';target_key=root/'target-key'
+            target_cert.write_text('cert');target_key.write_text('key')
             config={'cert':str(cert),'key':str(key),'udp_ports':[443],
+                    'cert_target':str(target_cert),'key_target':str(target_key),
                     'listeners':[dict(protocol='udp',address='00000000',port=443)]}
             state=root/'cert-sync.json';original=json.dumps(config);state.write_text(original)
             pair=CertificatePair(cert,key,None,time.time()+864000)
