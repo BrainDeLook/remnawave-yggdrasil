@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import socket
 import subprocess
 import sys
 import termios
@@ -392,15 +391,9 @@ def main(argv=None):
         local.write(local.BASE/'multi-state.json',json.dumps(state,ensure_ascii=False,indent=2))
         local.write(Path('/usr/local/sbin/remnawave-yggdrasil'),f'#!/bin/sh\nexec /usr/bin/python3 {local.APP}/multi.py "$@"\n',0o700)
         section(4,'Применение: проверка TCP-слушателей')
-        for p,tag in mapping.items():
-            if p=='hy2': continue
-            target=address if p=='ygg' else '127.0.0.1'
-            for attempt in range(30):
-                try:
-                    with socket.create_connection((target,raw_by_tag[tag]['port']),timeout=2): break
-                except OSError:
-                    if attempt==29: raise Error('Не появился слушатель '+tag+'. Проверьте журнал ноды и профиль; уже созданные настройки сохранены.') from None
-                    time.sleep(2)
+        local.ensure_listeners([(tag,address if p=='ygg' else '127.0.0.1',raw_by_tag[tag]['port'])
+                                for p,tag in mapping.items() if p!='hy2'],
+                               udp_targets=tuple((tag,raw_by_tag[tag]['port']) for p,tag in mapping.items() if p=='hy2'))
         if certificate_managed: certificates.remember_runtime()
         state.update(verification='listeners',checked_protocols=[p for p in mapping if p!='hy2'],
                      checked_at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'))

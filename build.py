@@ -4,6 +4,7 @@ import hashlib
 import io
 from pathlib import Path
 import re
+import shlex
 import tarfile
 root=Path(__file__).resolve().parent
 parser=argparse.ArgumentParser(); parser.add_argument('--update',action='store_true'); args=parser.parse_args()
@@ -18,6 +19,9 @@ data=buffer.getvalue(); digest=hashlib.sha256(data).hexdigest()
 (root/'dist').mkdir(exist_ok=True)
 archive=root/'dist'/f'remnawave-yggdrasil-{version}.tar'; archive.write_bytes(data)
 installer=root/'install.sh'; text=installer.read_text(encoding='utf-8')
+extract=re.search(r'^tar -xf "\$scratch/bundle.tar" -C "\$scratch" (.+)$',text,re.M)
+with tarfile.open(fileobj=io.BytesIO(data)) as bundle:
+    assert extract and set(shlex.split(extract[1]))==set(bundle.getnames()), 'Bootstrap must extract every bundled module'
 if args.update:
     installer.write_text(re.sub(r'BUNDLE_SHA256=\w+','BUNDLE_SHA256='+digest,text),encoding='utf-8',newline='\n')
 else:

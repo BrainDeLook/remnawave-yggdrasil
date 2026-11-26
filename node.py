@@ -225,6 +225,48 @@ def connect(address: str, port: int, banner: bool = False):
             raise Error('Порт SSH обслуживается другим протоколом')
 
 
+def ensure_listeners(targets: list[tuple[str,str,int]], *,
+                     udp_targets: tuple[tuple[str,int],...] = ()) -> None:
+    """Wait for activation; work around the panel's unchanged-hash restart skip once."""
+    if not targets and not udp_targets:
+        return
+    from certificate_runtime import core_snapshot
+    from ui import say
+
+    started=time.monotonic()
+    deadline=started+90
+    restarted=False
+    while True:
+        missing=[]
+        for tag,host,port in targets:
+            remaining=deadline-time.monotonic()
+            if remaining<=0:
+                missing.append(tag)
+                break
+            try:
+                with socket.create_connection((host,port),timeout=min(2,remaining)):
+                    pass
+            except OSError:
+                missing.append(tag)
+        if udp_targets:
+            core=core_snapshot()
+            ports={listener.port for listener in core.listeners if listener.protocol.startswith('udp')} if core else set()
+            missing.extend(tag for tag,port in udp_targets if port not in ports)
+        if not missing:
+            return
+        now=time.monotonic()
+        if now>=deadline:
+            raise Error('Не появился слушатель '+missing[0]+'. Проверьте журнал ноды и профиль; уже созданные настройки сохранены.')
+        if not restarted and now-started>=10:
+            say('  Новые слушатели ещё не появились. Один раз перезапускаю Remnanode на этой VPS; '
+                'текущие подключения кратко прервутся.','warning')
+            run('docker','restart','remnanode',timeout=120)
+            restarted=True
+            deadline=max(deadline,time.monotonic()+60)
+            continue
+        time.sleep(min(2,deadline-now))
+
+
 def ssh_config(address: str, port: int):
     managed=Path('/etc/systemd/system/remna-ygg-ssh.service').exists()
     if not managed:
