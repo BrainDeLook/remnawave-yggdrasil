@@ -9,16 +9,21 @@ from converter import LABELS, HOST_SUFFIXES
 def apply(api: API, node: Node, before: dict, config: dict, mapping: dict[str,str],
           source: Host, address: str, name: str, backup: Path,
           previous_name: str | None = None) -> list[dict]:
-    """Preserve panel edits; only migrate names that exactly match our generated format."""
+    """Format the selected TCP Host; preserve other edits on existing transports."""
     selected=Node.parse(api.request('GET','/nodes/'+node.uuid),require_connected=False)
     if selected.profile!=node.profile:
         raise Error('Активный профиль ноды изменился. Настройки панели не менялись; повторите запуск.')
     current=obj(api.request('GET','/config-profiles/'+node.profile))
     if current['config'] != before:
         raise Error('Профиль изменился во время установки. Повторите запуск, чтобы сохранить чужие изменения.')
+    current_source=Host.parse(api.request('GET','/hosts/'+source.uuid))
+    if (current_source.profile,current_source.inbound,current_source.nodes)!=(source.profile,source.inbound,source.nodes):
+        raise Error('Привязка исходного TCP Host изменилась во время установки. Повторите запуск; настройки панели не менялись.')
     backup.mkdir(parents=True,exist_ok=True,mode=0o700)
     (backup/'profile-before.json').write_text(json.dumps(current,ensure_ascii=False,indent=2),encoding='utf-8')
     (backup/'profile-before.json').chmod(0o600)
+    (backup/'source-before.json').write_text(json.dumps(current_source.raw,ensure_ascii=False,indent=2),encoding='utf-8')
+    (backup/'source-before.json').chmod(0o600)
     if config!=before:
         api.request('PATCH','/config-profiles',{'uuid':node.profile,'config':config})
     # A lost PATCH response is resolved by a normal rerun; no blind mutation retries.
@@ -36,6 +41,8 @@ def apply(api: API, node: Node, before: dict, config: dict, mapping: dict[str,st
         api.request('PATCH','/nodes',{'uuid':node.uuid,'configProfile':{
             'activeConfigProfileUuid':node.profile,'activeInbounds':active}})
     all_hosts=api.hosts()
+    if current_source.name!=name+' TCP':
+        api.request('PATCH','/hosts',{'uuid':source.uuid,'remark':name+' TCP'})
     result=[]
     for protocol,tag in mapping.items():
         identifier=identifiers[tag]

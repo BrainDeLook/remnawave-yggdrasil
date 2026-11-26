@@ -8,7 +8,7 @@ import shlex
 import tarfile
 root=Path(__file__).resolve().parent
 parser=argparse.ArgumentParser(); parser.add_argument('--update',action='store_true'); args=parser.parse_args()
-version='v0.3.8'
+version='v0.3.9'
 buffer=io.BytesIO()
 with tarfile.open(fileobj=buffer,mode='w',format=tarfile.USTAR_FORMAT) as bundle:
     for name in ('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py','certificate_sources.py','certificate_runtime.py','ui.py','screen.py'):

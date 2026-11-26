@@ -20,7 +20,7 @@ import certificates
 import provision
 from certificate_runtime import require_root_core
 
-VERSION='0.3.8'
+VERSION='0.3.9'
 FILES=('api.py','main.py','node.py','probe.py','multi.py','converter.py','provision.py','certificates.py','certificate_sources.py','certificate_runtime.py','ui.py','screen.py')
 
 
@@ -190,7 +190,7 @@ def main(argv=None):
     name=args.name or old.get('name') or selected.name
     if not args.yes and not args.name:
         ui.page('3 · Название подключений')
-        say('  Общее название без протокола. Например: 🇳🇱 Нидерланды.\n  Мастер добавит короткое окончание Histeria, GRPC, XHTTP или Ygg.','example')
+        say('  Общее название без протокола. Например: 🇳🇱 Нидерланды.\n  Исходный Host получит окончание TCP, дополнения — Histeria, GRPC, XHTTP или Ygg.','example')
         name=prompt('Общее название сервера',name)
     if not 1<=len(name)<=60 or any(c in name for c in '\r\n'): raise Error('Название должно содержать от 1 до 60 символов')
     # Omitting Yggdrasil means leave it alone, including the saved SSH/access state.
@@ -309,6 +309,9 @@ def main(argv=None):
             say('  Сертификат истекает менее чем через 7 дней. Проверьте автопродление Certbot/Caddy.','warning')
     ui.page('6 · План применения')
     frame('ПЛАН ПРИМЕНЕНИЯ',[(selected.name+' · '+selected.address,'value'),('Профиль: '+profile['name'],'text')])
+    field('Название исходного TCP Host',source.name+' → '+name+' TCP')
+    if not source.nodes or len(source.nodes)>1:
+        say('  Это общий Host. Его новое имя будет видно всем пользователям этого Host,\n  включая подключения через другие привязанные ноды.','warning')
     for p,tag in mapping.items():
         say('\n  '+LABELS[p],'section')
         field('Inbound',tag)

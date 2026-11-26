@@ -333,10 +333,18 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         assert any(l.protocol.startswith('tcp') and l.port==443 for l in running_core.listeners)
         print('PASS actual rw-core identity and owned TCP listener checked before certificate writes',flush=True)
         squad_before=api.request('GET','/internal-squads/'+squad['uuid'])
+        original_links=api.request('GET','/subscriptions/by-username/'+user['username'])['links']
+        original_tcp=next(link for value in original_links
+                          if urllib.parse.unquote((link:=urllib.parse.urlsplit(value)).fragment)==source['remark'])
         subprocess.run(multi_args,check=True)
         assert api.request('GET','/internal-squads/'+squad['uuid'])==squad_before
+        state=json.loads(Path('/etc/remnawave-yggdrasil/multi-state.json').read_text())
         pending=api.request('GET','/subscriptions/by-username/'+user['username'])['links']
-        assert not any('Multi CI' in urllib.parse.unquote(link) for link in pending)
+        pending_links=[urllib.parse.urlsplit(link) for link in pending]
+        pending_names=[urllib.parse.unquote(link.fragment) for link in pending_links]
+        assert all(host['name'] not in pending_names for host in state['hosts'])
+        renamed_tcp=next(link for link in pending_links if urllib.parse.unquote(link.fragment)=='Multi CI TCP')
+        assert renamed_tcp._replace(fragment='')==original_tcp._replace(fragment='')
         # Profile reloads are deduplicated by profile UUID in Remnawave. Wait until
         # installation's queue finishes before simulating a separate panel action.
         wait(lambda: run('docker','exec','test-remna-redis','valkey-cli','EXISTS',
@@ -347,13 +355,16 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         installed=api.request('GET','/config-profiles/'+profile['uuid'])
         api.request('PATCH','/internal-squads',{'uuid':squad['uuid'],
                     'inbounds':[i['uuid'] for i in installed['inbounds']]})
-        state=json.loads(Path('/etc/remnawave-yggdrasil/multi-state.json').read_text())
         assert json.loads(Path('/etc/remnawave-yggdrasil/cert-sync.json').read_text())['cert']==str(caddy_cert)
         assert (upstream_cert.read_bytes(),upstream_key.read_bytes())==upstream_before
         actual=api.request('GET','/config-profiles/'+profile['uuid'])
         assert len(actual['config']['inbounds'])==5
         assert actual['config']['inbounds'][0]==raw
-        assert api.request('GET','/hosts/'+source['uuid'])==snapshot['source']
+        expected_source=dict(snapshot['source'],remark='Multi CI TCP')
+        assert api.request('GET','/hosts/'+source['uuid'])==expected_source
+        source_backups=list(Path('/etc/remnawave-yggdrasil/backups').glob('*/source-before.json'))
+        assert any(json.loads(path.read_text())==snapshot['source'] for path in source_backups)
+        assert all(path.stat().st_mode & 0o077==0 for path in source_backups)
         ygg_host=next(h for h in state['hosts'] if h['protocol']=='ygg')
         ygg_raw=next(i for i in actual['config']['inbounds'] if i['tag']==ygg_host['tag'])
         # Squad changes propagate asynchronously through the panel's node queue.
@@ -362,7 +373,9 @@ print('PASS independent SSH ACL: VPN friend cannot use SSH, SSH-only client can'
         links=api.request('GET','/subscriptions/by-username/'+user['username'])['links']
         parsed=[urllib.parse.urlsplit(link) for link in links]
         names=[urllib.parse.unquote(link.fragment) for link in parsed]
+        assert 'Multi CI TCP' in names
         assert all(h['name'] in names for h in state['hosts'])
+        print('PASS original TCP renamed in Host/subscription: UUID, binding, connection parameters and ACL preserved',flush=True)
         # Test the same user-specific transport parameters the normal subscription exposes.
         transport_outbounds={}
         for host in state['hosts']:
@@ -470,6 +483,7 @@ print('PASS dedicated Ygg port: owner can connect only to Ygg address, other int
                 from converter import LABELS
                 api.request('PATCH','/hosts',{'uuid':host['host_uuid'],'remark':'Multi CI · '+LABELS[host['protocol']]})
         subprocess.run(multi_args,check=True)
+        assert api.request('GET','/hosts/'+source['uuid'])==expected_source
         for host in state['hosts']:
             if host['protocol'] in ('grpc','xhttp'):
                 assert api.request('GET','/hosts/'+host['host_uuid'])['remark']=='Multi CI '+host['protocol'].upper()
